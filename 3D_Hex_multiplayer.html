@@ -712,8 +712,9 @@ function main() {
       	    old_active_level = active_level;
       	    old_active_k = active_k;
       	    if (new_active_level == active_level && new_active_k == active_k &&
-      	          sphere_colors[i] == 0)
-      	       do_new_move();
+      	          sphere_colors[i] == 0) {
+      	       if (do_new_move() === false) return; // blocked (wrong turn etc); don't set mouse_down
+      	       }
       	    else {
       	      active_level = new_active_level;
       	      active_k = new_active_k;
@@ -1296,13 +1297,13 @@ function do_new_move() {
         if (socket) {
           if (my_seat === null) {
             nf.innerHTML = "Spectators cannot make moves.";
-            return;
+            return false;
           }
           // Enforce turns: seat 1 = red (player 1), seat 2 = green (player 2)
           if (my_seat !== player) {
             alert("It is not your turn, please wait.");
             mouse_down = 0; dragging = false;
-            return;
+            return false;  // signal to caller not to set mouse_down = 1
           }
           // Optimistic local update (visual only — authoritative copy comes from server)
           new_move = 1;
