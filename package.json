@@ -1,0 +1,8 @@
+{
+  "name": "3d-hex",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "*",
+    "socket.io": "*"
+  }
+}
