@@ -98,9 +98,9 @@ function notifyTurn(msg) {
   // of window focus) so keyboard-only users are always informed.
   var banner = document.createElement('div');
   banner.textContent = msg;
-  banner.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+  banner.style.cssText = 'position:fixed;top:8%;left:50%;transform:translateX(-50%);' +
     'background:#ff0;color:#000;font-size:28px;font-family:monospace;font-weight:bold;' +
-    'padding:20px 40px;border:4px solid #f00;border-radius:12px;z-index:99999;' +
+    'padding:14px 36px;border:4px solid #f00;border-radius:12px;z-index:99999;' +
     'text-align:center;box-shadow:0 0 30px rgba(0,0,0,0.5);';
   document.body.appendChild(banner);
   setTimeout(function() {
@@ -376,6 +376,7 @@ var jstart = 0, jend = 7;
 var ntheta = 17, nphi = 33;
 var ncyl_phi = 9;
 var frame = 0, db_cylinder_calls = 0;
+var global_debug = 0; // set to 1 to enable all console.log debug output
 var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0;
 var opacity = 0.5;
 var bond_lines = 0, line_width = 3;
@@ -726,7 +727,7 @@ function main() {
       	    let i = 19*new_active_level + new_active_k;
       	    let old_i = 19*t_active_level + t_active_k;
       	    if(1)
-	     console.log("new_active_level", new_active_level, "new_active_k", new_active_k,
+      if (global_debug) console.log("new_active_level", new_active_level, "new_active_k", new_active_k,
 	      "selected at position", x, y, "RGBA",
               pixels[0]/255., pixels[1]/255., pixels[2]/255., pixels[3]/255.,
               "site", 19*active_level + active_k, "i", i, "color", sphere_colors[i],
@@ -741,7 +742,7 @@ function main() {
       	      active_level = new_active_level;
       	      active_k = new_active_k;
       	      if(player == 1 && sphere_colors[i] != 2) {
-      	        console.log("Player = 1 so active i changed to", "level", active_level,
+               if (global_debug) console.log("Player = 1 so active i changed to", "level", active_level,
       	           "k", active_k);
       	        active_i = 19*active_level + active_k;
       	        }
@@ -830,8 +831,8 @@ function main() {
   var tick = function() {   // Start drawing
     if (moved && !mouse_down)
 	 	moved = 0;
-    if (db_cylinder_calls)
-    	console.log("tick", frame);
+    if (global_debug && db_cylinder_calls)
+     if (global_debug) console.log("tick", frame);
     if (new_move) {
        new_move = 0;
        // In multiplayer mode the win test runs in applyServerState() on both
@@ -1031,29 +1032,29 @@ function buildGeometry() {   // Code received from Claude, June 18, 2026
     }
     vbase += m;
   }
-console.log("opositions", opositions.length, "onormals", onormals.length,
+if (global_debug) console.log("opositions", opositions.length, "onormals", onormals.length,
     "oindices", oindices.length);
 }
 
 function depth_first_search(kind) {  // determine connectness from level 0 to level actual_levels-1
    var i, j, k, l, m, mm, n, temp_m, db_dfs = 0;
    var stack = []; // last in first out for depth first search
-   if (db_dfs && kind)
-   	console.log("Beginning DFS");
+   if (global_debug && db_dfs && kind)
+    if (global_debug) console.log("Beginning DFS");
    var visited = new Int16Array(nsites).fill(0); // initialize to unvisited
    for (k = 0; k < 19; ++k) // push all acceptable cells on layer 0 onto stack
       if (sphere_colors[k] == 2 ||
             kind == 1 && sphere_colors[k] == 0) {  // green, or else unclaimed if kind == 1
          stack.push(k);
-         if (db_dfs && kind)
-            console.log(" Pushing level 0 k", k, "of color", sphere_colors[k], "onto stack");
+         if (global_debug && db_dfs && kind)
+            if (global_debug) console.log(" Pushing level 0 k", k, "of color", sphere_colors[k], "onto stack");
          }
    while (stack.length > 0) {
       j = stack.pop();
       if (!visited[j]) {
          visited[j] = 1;
-         if (db_dfs && kind)
-            console.log("  visiting level", Math.floor(j/19.),"k",j-19*Math.floor(j/19.) );
+         if (global_debug && db_dfs && kind)
+            if (global_debug) console.log("  visiting level", Math.floor(j/19.),"k",j-19*Math.floor(j/19.) );
          for (m = 0; m < 14; ++m) {
            mm = all_bonds_in_order[m];
            n = win_test_bond_sites[14*j + mm]; // do most forward bonds first
@@ -1061,8 +1062,8 @@ function depth_first_search(kind) {  // determine connectness from level 0 to le
                kind == 1 && sphere_colors[n] == 0)) {  // green, or else unclaimed if kind == 1
                  stack.push(n);
               if (Math.ceil((n+1)/19.) >= actual_levels) { // reached the last level
-                 if (db_dfs && kind)
-                   console.log(" Returning true at level", 
+                 if (global_debug && db_dfs && kind)
+                   if (global_debug) console.log(" Returning true at level", 
                       Math.floor(n/19.),"k",n-19*Math.floor(n/19.) );
                  return true;
                  }
@@ -1209,12 +1210,12 @@ function initVertexBuffers(gl) {
       for (l = 0; l < 3; ++l)
          for (m = 0; m < 3; ++m)
             normals[k + 3*l + m] = tnormal[m];
-      if (dbg) {
-          console.log("triangle", n, "k", k, "normal", tnormal[0], tnormal[1], tnormal[2]);
-          console.log("  vertex 1:   ", vertices[k], vertices[k+1], vertices[k+2]);
-          console.log("  vertex 2:   ", vertices[k+3], vertices[k+4], vertices[k+5]);
-          console.log("  vertex 3:   ", vertices[k+6], vertices[k+7], vertices[k+8]);
-          console.log("  kk", kk, "indices", indices[kk], indices[kk+1], indices[kk]+2);
+      if (global_debug && dbg) {
+          if (global_debug) console.log("triangle", n, "k", k, "normal", tnormal[0], tnormal[1], tnormal[2]);
+          if (global_debug) console.log("  vertex 1:   ", vertices[k], vertices[k+1], vertices[k+2]);
+          if (global_debug) console.log("  vertex 2:   ", vertices[k+3], vertices[k+4], vertices[k+5]);
+          if (global_debug) console.log("  vertex 3:   ", vertices[k+6], vertices[k+7], vertices[k+8]);
+          if (global_debug) console.log("  kk", kk, "indices", indices[kk], indices[kk+1], indices[kk]+2);
           }
       }
       
@@ -1232,11 +1233,11 @@ function initVertexBuffers(gl) {
              }
            indices[k] = lvstart + 2*n;
            indices[k+1] = lvstart + 2*n + 1;
-           if (dbb && i < 20) {
-              console.log("i", i, "j", j, "m", m, "n", n, "k", k, "l", l);
+           if (global_debug && dbb && i < 20) {
+              if (global_debug) console.log("i", i, "j", j, "m", m, "n", n, "k", k, "l", l);
               let kk = indices[k], k1 = indices[k+1];
-              console.log("   ", kk, vertices[3*kk], vertices[3*kk + 1], vertices[3*kk + 2]);
-              console.log("   ", k1, vertices[3*k1], vertices[3*k1 + 1], vertices[3*k1 + 2]);
+              if (global_debug) console.log("   ", kk, vertices[3*kk], vertices[3*kk + 1], vertices[3*kk + 2]);
+              if (global_debug) console.log("   ", k1, vertices[3*k1], vertices[3*k1 + 1], vertices[3*k1 + 2]);
               }
            }
        // make the 7 forward bonds from the  central active site
@@ -1254,7 +1255,7 @@ function initVertexBuffers(gl) {
            k = fistart + 2*jj;
            indices[k] = fvstart + 2*jj;
            indices[k+1] = fvstart + 2*jj + 1;
-           console.log("i", i, "jj", jj, "l", l, "k", k, "fistart + 2*jj", fvstart + 2*jj);
+           if (global_debug) console.log("i", i, "jj", jj, "l", l, "k", k, "fistart + 2*jj", fvstart + 2*jj);
            }
 	// Write the vertex property to buffers (coordinates, colors and normals)
 	if (!initArrayBuffer(gl, 'a_Position', vertices, 3)) return -1;
@@ -1273,12 +1274,12 @@ function initVertexBuffers(gl) {
 	gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
 
 	if (debug) {
-		console.log("Vertices");
+  if (global_debug) console.log("Vertices");
 		for (i = 0; i < nverts; ++i)
-			console.log(i, "   ", vertices[3*i], vertices[3*i + 1], vertices[3*i + 2]);
-		console.log("Triangles");
+   if (global_debug) console.log(i, "   ", vertices[3*i], vertices[3*i + 1], vertices[3*i + 2]);
+  if (global_debug) console.log("Triangles");
 		for (i = 0; i < ntriangles; ++i)
-			console.log(i, "   ", indices[3*i], indices[3*i + 1], indices[3*i + 2]);
+   if (global_debug) console.log(i, "   ", indices[3*i], indices[3*i + 1], indices[3*i + 2]);
 		}
 	return indices.length;
 }
@@ -1373,7 +1374,7 @@ function do_new_move() {
              nf.innerHTML = "Remaining red turns: " +
                   Math.ceil(red_moves).toFixed(0);
              }
-          console.log("red_moves", red_moves);
+          if (global_debug) console.log("red_moves", red_moves);
           ++moves;
           first_add = 4;
           }
@@ -1404,24 +1405,24 @@ function adjust_bond_sites(expand) {
    }
         
 function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
-  console.log("key code", ev.keyCode);
+  if (global_debug) console.log("key code", ev.keyCode);
   mouse_control_key = ev.ctrlKey;
   switch (ev.keyCode) {
       case 38: // Up arrow key -> translate right
       ty += tstep;
-      console.log("ty", ty);
+      if (global_debug) console.log("ty", ty);
       break;
     case 40: // Down arrow key -> translate left
       ty -= tstep;
-      console.log("ty", ty);
+      if (global_debug) console.log("ty", ty);
       break;
     case 39: // Right arrow key -> translight right
       tx += tstep;
-      console.log("tx", tx);
+      if (global_debug) console.log("tx", tx);
       break;
     case 37: // Left arrow key -> translate left
       tx -= tstep;
-      console.log("tx", tx);
+      if (global_debug) console.log("tx", tx);
       break;
     case 47: // slash '/'
     case 191: // my laptop's '?' key: switch first player
@@ -1612,7 +1613,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
                 nf.innerHTML = "First player is green 1D player";
                 red_moves = redturns;
                 }
-              console.log("player", player, "red_moves", red_moves);
+              if (global_debug) console.log("player", player, "red_moves", red_moves);
               }
             waiting_for_confirmation = 0;
             break;
@@ -1740,7 +1741,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       // console.log("new end_level", end_level);
       break;
     case 34: // page down: decrease actual_levels, i. e., length of cylinder 
-         console.log("key press", ev.keyCode);
+         if (global_debug) console.log("key press", ev.keyCode);
          if (moves == 0) {
            if (actual_levels > 2) {
               var new_levels = actual_levels - 1;
@@ -1823,7 +1824,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (line_width < 7.375) {
        line_width += 0.125;
        gl.lineWidth(line_width);
-       console.log("line_width", line_width);
+       if (global_debug) console.log("line_width", line_width);
        }
       break;
     case 102: // numpad 6
@@ -1831,21 +1832,21 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (line_width > .125) {   
         line_width -= 0.125;
         gl.lineWidth(line_width);
-        console.log("line_width", line_width);
+        if (global_debug) console.log("line_width", line_width);
         }
       break;
     case 103: // numpad 7
     case 55: // '7' increase opacity
       if (opacity < 1) {
        opacity += 0.125;
-       console.log("opacity", opacity);
+       if (global_debug) console.log("opacity", opacity);
        }
       break;
     case 104: // numpad 8
     case 56: // '8' decrease opacity
       if (opacity > .125) {   
         opacity -= 0.125;
-        console.log("opacity", opacity);
+        if (global_debug) console.log("opacity", opacity);
         }
       break;
     case 105: // numpad 9
@@ -1902,9 +1903,9 @@ function initArrayBuffer(gl, attribute, data, num) {
 
 function print_flat_matrix_4(m, name) {
    let i, j;
-   console.log(name);
+   if (global_debug) console.log(name);
    for (i = 0; i < 4; ++i)
-      console.log(m[i], m[i+4], m[i+8], m[i+12]);
+      if (global_debug) console.log(m[i], m[i+4], m[i+8], m[i+12]);
    }
    
 Matrix4.prototype.my_multiplyArray3 = function(p) {
@@ -1964,7 +1965,7 @@ function make_bond_sites() {
   	             --ll;
   	      if (kk < 0) {
   	        bond_sites[m] = -1;
-  	        console.log("unexpected kk < 0 for i =", i, "and j =", j);
+           if (global_debug) console.log("unexpected kk < 0 for i =", i, "and j =", j);
   	        }
   	      else
   	        bond_sites[m] = 19*ll + kk;
@@ -2002,18 +2003,18 @@ function make_bond_sites() {
         len[j] += bond_vector[3*j + k]*bond_vector[3*j + k];
         }
       dot2 = bond_vector[3*j] - bond_vector[3*j + 1];
-      if (dbbond)
-        console.log("j", j, "bond_vector", bond_vector[3*j], bond_vector[3*j+1],
+      if (global_debug && dbbond)
+        if (global_debug) console.log("j", j, "bond_vector", bond_vector[3*j], bond_vector[3*j+1],
           bond_vector[3*j+2], "dot1", dot1, "dot2", dot2, "len", Math.sqrt(len[j]));
       }
-   if(dbbond)
+   if (global_debug && dbbond)
    for (i = 0; i < 7; ++i)
      for (j = i+1; j < 7; ++j) {
         dist = 0;
         for (k = 0; k < 3; ++k)
            dist += (bond_vector[3*i + k] - bond_vector[3*j+k]) *
               (bond_vector[3*i + k] - bond_vector[3*j+k]);
-           console.log("i", i, "j", j, "  ",Math.sqrt(len[i]), Math.sqrt(len[j]),
+           if (global_debug) console.log("i", i, "j", j, "  ",Math.sqrt(len[i]), Math.sqrt(len[j]),
             "    ", Math.sqrt(dist));
         }
    for (i = 0; i < actual_nsites; ++i) 
@@ -2074,7 +2075,7 @@ function make_win_test_bond_sites() {
   	             --ll;
   	      if (kk < 0) {
   	        win_test_bond_sites[m] = -1;
-  	        console.log("unexpected kk < 0 for i =", i, "and j =", j);
+           if (global_debug) console.log("unexpected kk < 0 for i =", i, "and j =", j);
   	        }
   	      else
   	        win_test_bond_sites[m] = 19*ll + kk;
@@ -2099,7 +2100,7 @@ function make_win_test_bond_sites() {
 function clip_bond_sites() {
   let i, j, k, l, kk, ll, m, n;
   if(0) for (i = 0; i < actual_nsites; ++i) 
-     console.log(
+     if (global_debug) console.log(
        i, "bond sites", 
        bond_sites[14*i+0], bond_sites[14*i+1], bond_sites[14*i+2], bond_sites[14*i+3], 
        bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
@@ -2116,20 +2117,20 @@ function clip_bond_sites() {
         for (m = 0; m < 14; ++m) {
      	   n = bond_sites[14*i + m];
      	   if (1 && l == 0 && k == 2)
-     	      console.log("clip_bond_sites l", l, "k", k, "i", i,"14*i + m", 14*i + m, "n", n, bond_sites[14*i + m]);
+            if (global_debug) console.log("clip_bond_sites l", l, "k", k, "i", i,"14*i + m", 14*i + m, "n", n, bond_sites[14*i + m]);
            if (n >= 0) {
      	     kk = n - 19*Math.floor(n/19);
-     	     console.log("l", l, "k", k, "i", i, "m", m, "n", n, "kk", kk);
+           if (global_debug) console.log("l", l, "k", k, "i", i, "m", m, "n", n, "kk", kk);
      	     if (kk > 6) {
      	       bond_sites[14*i + m] = -1;
-     	       console.log("reset l", l, "k", k, "i", i, "n", n, "kk", kk);
+             if (global_debug) console.log("reset l", l, "k", k, "i", i, "n", n, "kk", kk);
      	       }
      	     }
      	   }
         }
       }
   if(0) for (i = 0; i < actual_nsites; ++i) 
-     console.log(
+     if (global_debug) console.log(
        i, "bond sites", 
        bond_sites[14*i+0], bond_sites[14*i+1], bond_sites[14*i+2], bond_sites[14*i+3], 
        bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
@@ -2159,13 +2160,13 @@ function set_bond_colors(l, k, player, temporary) {
               n = j+7;
               saved_cylinder_colors[n] = cylinder_colors[m];
               saved_active_bond_m[n] = m;
-              if (dbg)
-                console.log("1 saved n", n, "m", m, "color", cylinder_colors[m]); 
+              if (global_debug && dbg)
+                if (global_debug) console.log("1 saved n", n, "m", m, "color", cylinder_colors[m]); 
               }
             if (sphere_colors[i] == player) {
             	cylinder_colors[m] = player;
-              if (dbg)
-                console.log("1 cylinder colors[", m, "] = ", player);
+              if (global_debug && dbg)
+                if (global_debug) console.log("1 cylinder colors[", m, "] = ", player);
               }
             }
          }
@@ -2178,14 +2179,14 @@ function set_bond_colors(l, k, player, temporary) {
        if (temporary) {
        	 saved_cylinder_colors[j] = cylinder_colors[m];
          saved_active_bond_m[j] = m;
-         if (dbg)
-                console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
+         if (global_debug && dbg)
+                if (global_debug) console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
                   "bond end", bond_sites[mm]);
          }
        if (sphere_colors[bond_sites[mm]] == player) {
           cylinder_colors[m] = player;
-          if (dbg)
-              console.log("1 cylinder colors[", m, "] = ", player, "j", j,
+          if (global_debug && dbg)
+              if (global_debug) console.log("1 cylinder colors[", m, "] = ", player, "j", j,
                 "bond end", bond_sites[mm]);
           }
        }
@@ -2198,13 +2199,13 @@ function set_bond_colors(l, k, player, temporary) {
        if (temporary) {
        	 saved_cylinder_colors[j] = cylinder_colors[m];
          saved_active_bond_m[j] = m;
-         if (dbg)
-                console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
+         if (global_debug && dbg)
+                if (global_debug) console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
          }
        if (sphere_colors[bond_sites[mm]] == player) {
           cylinder_colors[7*bond_sites[mm]+j] = player;
-          if (dbg)
-              console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
+          if (global_debug && dbg)
+              if (global_debug) console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
                 "bond end", bond_sites[mm]);
           }
        }
@@ -2216,8 +2217,8 @@ function set_bond_colors(l, k, player, temporary) {
 function restore_bond_colors(l, k) {
    var i, j, m, db_restore = 0;
    i = 19*l + k;
-   if(db_restore)
-      console.log("restore_bond_colors", "l", l, "k", k);
+   if (global_debug && db_restore)
+      if (global_debug) console.log("restore_bond_colors", "l", l, "k", k);
    else
      for (j = 0; j < 7; ++j) {
       cylinder_colors[7*i + j] = 0;
@@ -2353,9 +2354,9 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
            gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
    	   gl.drawElements(gl.LINES, 2, gl.UNSIGNED_SHORT, 2*kk);
    	   }
-   	 if (dbg && first && frame == 1) {
+   	 if (global_debug && dbg && first && frame == 1) {
    	   --first;
-   	   console.log("bond_lines j", j, "i", i, "k", k, "mm", mm, "m", m, "n", n, "kk", kk);
+       if (global_debug) console.log("bond_lines j", j, "i", i, "k", k, "mm", mm, "m", m, "n", n, "kk", kk);
    	   }
    	 }
         }
@@ -2384,8 +2385,8 @@ function draw_forward_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix,
    
 function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix) {
   var i, m, n, kk, c_add;
-  if (db_cylinder_calls)
-  	console.log("drawcylinders");
+  if (global_debug && db_cylinder_calls)
+   if (global_debug) console.log("drawcylinders");
   normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
   normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
   if (do_tilt_z) 
@@ -2432,7 +2433,7 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
             c_add = 0;
          gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
          if (0 && cylinder_colors[m] > 0 && do_drawing_cylinder_output)
-           console.log("drawing cylinder", m, "i", i, "j", j, "bondsite", n, "color", cylinder_colors[m]);
+           if (global_debug) console.log("drawing cylinder", m, "i", i, "j", j, "bondsite", n, "color", cylinder_colors[m]);
          v_modelMatrix.setTranslate(tx, ty, tz);
          v_modelMatrix.multiply(normalMatrix);
   	 v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
@@ -2497,7 +2498,7 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
    	   if (0 && frame == 1)
    	      for (ii = 0; ii < 7; ++ii) {
    	         m = bond_sites[14*i + ii];
-   	         console.log("site", sites[3*m], sites[3*m+1], sites[3*m+2], 
+             if (global_debug) console.log("site", sites[3*m], sites[3*m+1], sites[3*m+2], 
    	            "vector", sites[3*i] + bond_vector[3*ii], 
    	            sites[3*i+1] + bond_vector[3*ii+1], sites[3*i+2] + bond_vector[3*ii+2]);
    	         }
@@ -2531,13 +2532,13 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
                   gl.uniform4f(u_Color, colors[1 + c_add][0], colors[1 + c_add][1],
                              colors[1 + c_add][2], opacity);
    	          gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, 2*tistart + 6*ii);
-   	          if (dbg)
-   	             console.log("first_add", first_add);
-   	          if (dbg && first_add) {
-   	             console.log("drew triangle", ii);
-   	             console.log("vertices", i, mm, nn);
+   	          if (global_debug && dbg)
+                 if (global_debug) console.log("first_add", first_add);
+   	          if (global_debug && dbg && first_add) {
+                 if (global_debug) console.log("drew triangle", ii);
+                 if (global_debug) console.log("vertices", i, mm, nn);
    	             let kk = 3*(tvstart + 3*ii);
-   	             console.log("normal", normals[kk], normals[kk+1], normals[kk+2]);
+                 if (global_debug) console.log("normal", normals[kk], normals[kk+1], normals[kk+2]);
    	             let vp = [vpx, vpy, vpz];
                      let v_P = [], vvp = [], vvn, vdot = [], a = [], b = [], c = [], d = [];
                      v_P[0] = new Vector4([sites[3*i],   sites[3*i  + 1], sites[3*i  + 2], 1.]);
@@ -2551,7 +2552,7 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
                         for (let l = 0; l < 3; ++l)
                            vdot[p] += v_N.elements[l]*(vp[l] - vvp[p].elements[l]);
                         }
-                     console.log("vdot", vdot[0], vdot[1], vdot[2]);
+                     if (global_debug) console.log("vdot", vdot[0], vdot[1], vdot[2]);
                      for (l = 0; l < 3; ++l) {
                         a[l] = v_P[1].elements[l] - v_P[0].elements[l];
                         b[l] = v_P[2].elements[l] - v_P[0].elements[l];
@@ -2559,25 +2560,25 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
                         d[l] = vvp[2].elements[l] - vvp[0].elements[l];                        
                         } 
                      let cr = cross(a, b);
-                     console.log("cr", cr[0], cr[1], cr[2]);
+                     if (global_debug) console.log("cr", cr[0], cr[1], cr[2]);
                      let crr = cross(c, d);
-                     console.log("c", c[0], c[1], c[2]);
-                     console.log("d", d[0], d[1], d[2]);
-                     console.log("crr", crr[0], crr[1], crr[2]);
-                     console.log("vvn", vvn.elements[0], vvn.elements[1], vvn.elements[2]);
+                     if (global_debug) console.log("c", c[0], c[1], c[2]);
+                     if (global_debug) console.log("d", d[0], d[1], d[2]);
+                     if (global_debug) console.log("crr", crr[0], crr[1], crr[2]);
+                     if (global_debug) console.log("vvn", vvn.elements[0], vvn.elements[1], vvn.elements[2]);
                      }
                    }
    	      // else 
    	      if (0 && frame == 1)
-   	        console.log("negative site: l", l, "k", k, "i", i, "ii", ii, 
+            if (global_debug) console.log("negative site: l", l, "k", k, "i", i, "ii", ii, 
    	          "m", m, "mm", mm, "n", n, "nn", nn);
    	      }
    	   } 
    	}
       }
     }
-  if (dbg && first_add)
-    console.log("l", l, "k", k, "i", i, "ii", ii);
+  if (global_debug && dbg && first_add)
+    if (global_debug) console.log("l", l, "k", k, "i", i, "ii", ii);
   }
 
 function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
