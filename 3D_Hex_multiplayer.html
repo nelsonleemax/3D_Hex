@@ -384,7 +384,7 @@ var n_cylinders = 7*19*nlevels, actual_n_cylinders = n_cylinders;
 var nsites = 19*nlevels, actual_nsites = nsites;
 let only_near_cursor = 0, display_context_bonds = 1;
 let near_level = 1;
-var context = 1;
+var context = 0;
 var yellow = 0;
 var sphere_vertices = ntheta*nphi;
 var sphere_triangles = 2*(ntheta-1)*(nphi-1); 
@@ -1395,6 +1395,13 @@ function add_random_red_site() {
      nf.innerHTML = random_sites+" random red positions have been added";
      }
    }
+   
+function adjust_bond_sites(expand) {
+   if (show_outer_layer || expand) {
+      make_bond_sites();
+      }
+   clip_bond_sites();
+   }
         
 function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
   console.log("key code", ev.keyCode);
@@ -1678,21 +1685,21 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (start_level < actual_levels-1 && start_level < end_level - 1) {
         ++start_level;
         nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";           
-        make_bond_sites();
+        adjust_bond_sites(0);
         }
       break;
     case 86: // 'v' decrement start_level
       if (start_level > 0) {
         --start_level;
         nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers"; 
-        make_bond_sites();
+        adjust_bond_sites(1);
         }
       break;
     case 66: // 'b' increment  end_level
       if (end_level < actual_levels) {
         ++end_level;
         nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";  
-        make_bond_sites();
+        adjust_bond_sites(1);
         }
       break;
     case 33: // page up: increment actual_levels, i. e., length of cylinder
@@ -1728,7 +1735,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (end_level > start_level + 1) {
         --end_level;
         nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";         
-        make_bond_sites();
+        adjust_bond_sites(0);
         }
       // console.log("new end_level", end_level);
       break;
@@ -2099,7 +2106,7 @@ function clip_bond_sites() {
        bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
        bond_sites[14*i+12], bond_sites[14*i+13]);   
   for (l = 0; l < actual_levels; ++l) {
-     for (k = 7; k < 19; ++k) {
+     for (k = n_k; k < 19; ++k) {
         i = 19*l + k;
         for (m = 0; m < 14; ++m)
            bond_sites[14*i + m] = -1;
@@ -2128,6 +2135,15 @@ function clip_bond_sites() {
        bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
        bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
        bond_sites[14*i+12], bond_sites[14*i+13]); 
+   for (i = 0; i < actual_nsites; ++i) 
+      for (j = 0; j < 14; ++j) {
+        m = bond_sites[14*i + j];
+        if (m >= 0) {
+          k = Math.floor(m/19);
+          if (k < start_level || k >= end_level)
+             bond_sites[14*i + j] = -1;
+          }
+        }
   }
    
 function set_bond_colors(l, k, player, temporary) {
