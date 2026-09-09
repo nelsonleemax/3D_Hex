@@ -2252,22 +2252,38 @@ function drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMat
   // result = normalMatrix.multiplyVector3(vpos).elements;
   // console.log("result", result[0], result[1], result[2]);
   
-  for (j = start_level; j < end_level; ++j) {
+  // When context is on, determine the full level and k ranges to iterate:
+  // normal range + the clipped-away regions (shown as small truncated octahedra).
+  var j_min = context ? 0            : start_level;
+  var j_max = context ? actual_levels : end_level;
+  var k_max_full = context ? 19 : n_k; // when context on, also show outer k>n_k as octos
+
+  for (j = j_min; j < j_max; ++j) {
+    // Is this level in the hidden-by-level-clip region?
+    var level_hidden = (j < start_level || j >= end_level);
+    if (level_hidden && !context) continue; // skip if context off
+
     if (j == t_active_level && yellow)
       c_add = 4;
     else
       c_add = 0;
-    for (k = 0; k < n_k; ++k) {
+    for (k = 0; k < k_max_full; ++k) {
       rscale = r;
       octo = 0;
-      if (only_near_cursor && !(near[t_active_k].includes(k) &&
-          Math.abs(j - t_active_level) <= near_level))
+      // k hidden by ';' (outer layer clipped)?
+      var k_hidden = (k >= n_k);
+      // hidden by only_near_cursor?
+      var near_hidden = (only_near_cursor && !(near[t_active_k].includes(k) &&
+          Math.abs(j - t_active_level) <= near_level));
+
+      if (level_hidden || k_hidden || near_hidden) {
         if (!context)
-          continue
+          continue;
         else {
           rscale = rsmall;
           octo = 1;
-          } 
+          }
+        }
       i = 19*j + k;
       if (kind == 0) {
          gl.uniform1i(u_compute_color, 0);
@@ -2331,9 +2347,15 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
     gl.lineWidth(1);
   else
     gl.lineWidth(line_width);
+  // When context is on, extend loops to cover all hidden regions so we can
+  // draw context lines for bonds touching hidden spheres.
+  var bl_l_min = context ? 0             : start_level;
+  var bl_l_max = context ? actual_levels  : end_level;
+  var bl_k_max = context ? 19            : n_k;
+
   for (j = jstart; j < jend; j += 1) {
-   for (var l = start_level; l < end_level; ++l) {
-     for (var k = 0; k < n_k; ++k)
+   for (var l = bl_l_min; l < bl_l_max; ++l) {
+     for (var k = 0; k < bl_k_max; ++k)
        {
        i = 19*l + k;
        mm = 14*i + j;
@@ -2345,16 +2367,26 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
          kk = listart + 2*m;
          if (cylinder_colors[m] == 0 && suppress_white_bonds)
             continue;
-         if (only_near_cursor && near[t_active_k].includes(k) && near[t_active_k].includes(nk) 
-              && Math.abs(l  - t_active_level) <= near_level 
-              && Math.abs(nl  - t_active_level) <= near_level || context_pass) { 
-           if (j == t_active_level && nl == t_active_level && yellow)
-              c_add = 4;
-           else
-              c_add = 0;
-           gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
-   	   gl.drawElements(gl.LINES, 2, gl.UNSIGNED_SHORT, 2*kk);
-   	   }
+         // Is the source endpoint (l,k) visible in the main pass?
+         var src_visible = (l >= start_level && l < end_level && k < n_k &&
+              (!only_near_cursor || (near[t_active_k].includes(k) &&
+               Math.abs(l - t_active_level) <= near_level)));
+         // Is the dest endpoint (nl,nk) visible in the main pass?
+         var dst_visible = (nl >= start_level && nl < end_level && nk < n_k &&
+              (!only_near_cursor || (near[t_active_k].includes(nk) &&
+               Math.abs(nl - t_active_level) <= near_level)));
+         // Draw as context line if: context pass AND at least one endpoint hidden,
+         // OR normal bond-line pass where both endpoints are visible.
+         var draw_as_context = context_pass && context && !(src_visible && dst_visible);
+         var draw_as_normal  = !context_pass && src_visible && dst_visible;
+         if (!draw_as_context && !draw_as_normal)
+            continue;
+         if (l == t_active_level && nl == t_active_level && yellow)
+            c_add = 4;
+         else
+            c_add = 0;
+         gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
+   	     gl.drawElements(gl.LINES, 2, gl.UNSIGNED_SHORT, 2*kk);
    	 if (global_debug && dbg && first && frame == 1) {
    	   --first;
        if (global_debug) console.log("bond_lines j", j, "i", i, "k", k, "mm", mm, "m", m, "n", n, "kk", kk);
@@ -2609,7 +2641,12 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
     }
   else
     drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix);
-  if (context && only_near_cursor && display_context_bonds) {
+  // Context bond lines: drawn whenever context is on and any region is hidden
+  // (only_near_cursor, level clip, or outer-layer clip via ';').
+  // draw_bond_lines already skips bonds between two visible spheres (they are
+  // drawn as cylinders above); it only draws bonds touching hidden spheres.
+  if (context && display_context_bonds &&
+      (only_near_cursor || start_level > 0 || end_level < actual_levels || n_k < 19)) {
       gl.uniform1i(u_compute_color, 0);
       draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
       gl.uniform1i(u_compute_color, 1);
