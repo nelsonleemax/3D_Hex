@@ -505,6 +505,7 @@ var near = [
 var forward_bonds = [6, 0, 1, 9, 3, 5, 11];
 var all_bonds_in_order = [6, 0, 1, 9, 3, 5, 11, 4, 10, 12, 7, 8, 2, 13];
 var bond_sites = new Int16Array(14*19*nlevels).fill(-1);
+var full_bond_sites = new Int16Array(14*19*nlevels).fill(-1); // unclipped copy of bond_sites for context drawing
 var win_test_bond_sites = new Int16Array(14*19*nlevels).fill(-1);
 var move_index = new Int16Array([1, 5, 0, 0, 5, 4, 6]);
 var s3 = Math.sqrt(3.);
@@ -1646,6 +1647,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
         }
       break;
     case 9: // tab key: start game over before it is finished
+       ev.preventDefault(); // stop Chrome intercepting Tab to show tab list
        nf.innerHTML = "to start game over type Enter; otherwise continue the game";
        waiting_for_confirmation = 3;
        alert("to start game over before it is finished type Enter; otherwise continue the game");
@@ -1994,6 +1996,9 @@ function make_bond_sites() {
        bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
        bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
        bond_sites[14*i+12], bond_sites[14*i+13]); 
+   // Keep a full unclipped copy so context drawing works after clip_bond_sites()
+   full_bond_sites.set(bond_sites);
+
    for (j = 0; j < 14; ++j) {
       m = bond_sites[14*19 + j];
       let dot1 = 0, dot2, dist;
@@ -2359,7 +2364,9 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
        {
        i = 19*l + k;
        mm = 14*i + j;
-       n = bond_sites[mm];
+       // Normal pass uses clipped bond_sites; context pass uses full_bond_sites
+       // so it can find bonds whose endpoints were clipped away.
+       n = context_pass ? full_bond_sites[mm] : bond_sites[mm];
        if (n >= 0) {
          nl = Math.floor(n/19);
          nk = n - 19*nl;
@@ -2367,16 +2374,18 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
          kk = listart + 2*m;
          if (cylinder_colors[m] == 0 && suppress_white_bonds)
             continue;
-         // Is the source endpoint (l,k) visible in the main pass?
+         // Is the source endpoint (l,k) visible in the main drawing pass?
          var src_visible = (l >= start_level && l < end_level && k < n_k &&
               (!only_near_cursor || (near[t_active_k].includes(k) &&
                Math.abs(l - t_active_level) <= near_level)));
-         // Is the dest endpoint (nl,nk) visible in the main pass?
+         // Is the dest endpoint (nl,nk) visible in the main drawing pass?
          var dst_visible = (nl >= start_level && nl < end_level && nk < n_k &&
               (!only_near_cursor || (near[t_active_k].includes(nk) &&
                Math.abs(nl - t_active_level) <= near_level)));
-         // Draw as context line if: context pass AND at least one endpoint hidden,
-         // OR normal bond-line pass where both endpoints are visible.
+         // Context pass: draw if at least one endpoint is hidden (including
+         // the case where BOTH are hidden — both missing from clipped bond_sites
+         // but present in full_bond_sites).
+         // Normal pass: draw only when both endpoints are visible.
          var draw_as_context = context_pass && context && !(src_visible && dst_visible);
          var draw_as_normal  = !context_pass && src_visible && dst_visible;
          if (!draw_as_context && !draw_as_normal)
