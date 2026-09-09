@@ -1650,6 +1650,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
        waiting_for_confirmation = 3;
        alert("to start game over before it is finished type Enter; otherwise continue the game");
       mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+       refocusCanvas();
        break;    
     case 186: // ';' toggle display of outer layer of cylinder
       show_outer_layer = 1 - show_outer_layer;
