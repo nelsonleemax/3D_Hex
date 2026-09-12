@@ -58,6 +58,7 @@ function makeDefaultState() {
     move_active_k      : 0,
     undo_calls         : 0,
     red_bidder         : null,   // seat of player who bid for red, null if not yet bid
+    pending_random     : null,   // { seat, level, k } when one player pressed space awaiting confirmation
   };
 }
 
@@ -257,6 +258,42 @@ io.on('connection', (socket) => {
     const who = seat === 1 ? 'Red' : seat === 2 ? 'Green' : 'Spectator';
     // Relay to all clients (including sender so they see their own message)
     io.emit('chat', { who, msg: String(msg).slice(0, 300) });
+  });
+
+  // ── Space pressed (two-player random site confirmation) ─────────────────────
+  socket.on('space_pressed', ({ seat }) => {
+    if (state.moves > 0) return;
+
+    if (!state.pending_random) {
+      // First press: pick a random unoccupied site now so both clients use the same one
+      let level, k, attempts = 0;
+      do {
+        level = Math.floor(state.actual_levels * Math.random());
+        k     = Math.floor(19 * Math.random());
+        attempts++;
+      } while (state.sphere_colors[19 * level + k] !== 0 && attempts < 10000);
+
+      state.pending_random = { seat, level, k };
+      // Notify both clients — the requesting player gets the wait message (client-side),
+      // the other player gets the popup via 'pending_random' event
+      io.emit('pending_random', { requesting_seat: seat });
+
+    } else if (state.pending_random.seat !== seat) {
+      // Confirmation from the other player
+      const { level, k } = state.pending_random;
+      state.pending_random = null;
+      const i = 19 * level + k;
+      state.sphere_colors[i]  = 1;
+      state.random_sites      += 1;
+      state.move_active_level  = level;
+      state.move_active_k      = k;
+      broadcastState('state_update', state);
+
+    } else {
+      // Same player presses again — cancel
+      state.pending_random = null;
+      io.emit('random_cancelled');
+    }
   });
 
   // ── Disconnect ───────────────────────────────────────────────────────────

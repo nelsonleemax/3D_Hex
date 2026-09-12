@@ -347,6 +347,30 @@ function initSocket() {
     mouse_down = 0; dragging = false;
   });
 
+  // pending_random: server broadcasts this to BOTH clients when one presses space.
+  // The requesting player sees a waiting message; the other gets a popup.
+  socket.on('pending_random', function(data) {
+    if (my_seat === data.requesting_seat) {
+      // I am the requester — show waiting message
+      nf.innerHTML = 'Waiting for player ' + (my_seat === 1 ? 2 : 1) +
+                     ' to confirm a new random red position (press space to cancel).';
+    } else {
+      // I am the confirmer — show popup
+      setTimeout(function() {
+        alert('Player ' + data.requesting_seat + ' wants to add a random red position.\n' +
+              'Press the space bar to confirm.');
+        mouse_down = 0; dragging = false;
+        refocusCanvas();
+      }, 0);
+      nf.innerHTML = 'Press space to confirm adding a random red position.';
+    }
+  });
+
+  // random_added: both confirmed — add the site (server has already updated state)
+  socket.on('random_cancelled', function() {
+    nf.innerHTML = 'Random red position request was not confirmed by the other player.';
+  });
+
   socket.on('player_list', function(seats) {
     var seated = seats.length;
     if (seated < 2)
@@ -380,6 +404,7 @@ var global_debug = 0; // set to 1 to enable all console.log debug output
 var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0;
 var opacity = 0.5;
 var bond_lines = 0, line_width = 3;
+var require_space_from_both_players = 0; // when 1, both players must press space to add a random site
 var ncyl_verts = 2*ncyl_phi;
 var n_cylinders = 7*19*nlevels, actual_n_cylinders = n_cylinders;
 var nsites = 19*nlevels, actual_nsites = nsites;
@@ -1823,20 +1848,15 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
         }
       break;
     case 101: // numpad 5
-    case 53: // '5' increase line width
-      if (line_width < 7.375) {
-       line_width += 0.125;
-       gl.lineWidth(line_width);
-       if (global_debug) console.log("line_width", line_width);
-       }
+    case 53: // '5' toggle require_space_from_both_players
+      require_space_from_both_players = 1 - require_space_from_both_players;
+      nf.innerHTML = require_space_from_both_players
+        ? "Both players must press space to add a random red position."
+        : "One player pressing space adds a random red position.";
       break;
     case 102: // numpad 6
-    case 54: // '6' decrease line width
-      if (line_width > .125) {   
-        line_width -= 0.125;
-        gl.lineWidth(line_width);
-        if (global_debug) console.log("line_width", line_width);
-        }
+    case 54: // '6' (line width no longer supported in modern WebGL)
+      nf.innerHTML = "Line width adjustment is not supported in modern WebGL.";
       break;
     case 103: // numpad 7
     case 55: // '7' increase opacity
@@ -1872,11 +1892,14 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
     case 220: // '\' or '|' toggle display of context bond lines
       display_context_bonds = 1 - display_context_bonds;
       break;
-    case 32: // space
-      if (moves > 0) 
+    case 32: // space — add random red position (or confirm pending one)
+      if (moves > 0) {
          nf.innerHTML = "Cannot add a random red position. The game has already started.";
-      else
+      } else if (socket && require_space_from_both_players) {
+         socket.emit('space_pressed', { seat: my_seat });
+      } else {
          add_random_red_site();
+      }
       break;
     }
 }
