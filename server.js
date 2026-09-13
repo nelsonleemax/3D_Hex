@@ -199,10 +199,13 @@ io.on('connection', (socket) => {
 
   // ── Reset (new game) ─────────────────────────────────────────────────────
   socket.on('reset', ({ saved_first_player }) => {
-    state               = makeDefaultState();
-    state.player        = saved_first_player;
+    // makeDefaultState() clears everything including pending_random, red_bidder,
+    // random_sites, moves, sphere_colors — a fully clean slate.
+    state                    = makeDefaultState();
+    state.player             = saved_first_player;
     state.saved_first_player = saved_first_player;
-    state.red_moves     = state.redturns;
+    state.red_moves          = state.redturns;
+    // random_sites is 0 in default state — client uses this to detect a true reset
     broadcastState('state_update', state);
   });
 

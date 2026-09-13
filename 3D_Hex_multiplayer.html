@@ -124,9 +124,10 @@ function notifyTurn(msg) {
 // Called on 'welcome' and 'state_update'.  Updates all shared variables and
 // triggers a redraw.
 function applyServerState(s) {
-  var prev_moves = moves;
-  var prev_random_sites = random_sites;
-  var prev_player = player;  // track whose turn it was before this update
+  var prev_moves          = moves;
+  var prev_random_sites   = random_sites;
+  var prev_player         = player;
+  var prev_winning_player = winning_player; // for reset detection
 
   actual_levels      = s.actual_levels;
   redturns           = s.redturns;
@@ -161,14 +162,18 @@ function applyServerState(s) {
   // The server now stores the site's level/k in move_active_level/move_active_k,
   // so we can call set_bond_colors directly — no scan needed.
   if (random_sites > prev_random_sites && !my_move_in_flight) {
+    pending_confirmation = false;  // confirmation completed
     set_bond_colors(s.move_active_level, s.move_active_k, 1, 0);
     nf.innerHTML = random_sites + " random red positions have been added";
   }
 
-  // Sync active cursor and bond-site tables if a reset happened.
-  // When moves===0 arrives it means a new game has started — clear winning_player
-  // on ALL clients (not just the one who pressed Enter) so both screens reset.
-  if (moves === 0) {
+  // Detect a genuine game reset (Tab+Enter or win+Enter) rather than a normal
+  // pre-game state_update where moves happens to be 0.
+  // A reset is identified by moves===0 AND random_sites===0 (server cleared them)
+  // AND at least one of: we had moves, we had random sites, or there was a winner.
+  var is_reset = (moves === 0 && s.random_sites === 0 &&
+                  (prev_moves > 0 || prev_winning_player > 0 || prev_random_sites > 0));
+  if (is_reset) {
     winning_player     = 0;
     actual_nsites      = 19 * actual_levels;
     actual_n_cylinders = 7 * actual_nsites;
@@ -178,6 +183,7 @@ function applyServerState(s) {
     t_active_level     = active_level;
     t_active_k         = 0;
     tentative_move_pending = false;
+    pending_confirmation   = false;
     for (var ci = 0; ci < actual_nsites; ++ci) sphere_colors[ci] = 0;
     for (var ci = 0; ci < 7*actual_nsites; ++ci) cylinder_colors[ci] = 0;
     nf.innerHTML = (player === 1)
@@ -355,7 +361,9 @@ function initSocket() {
       nf.innerHTML = 'Waiting for player ' + (my_seat === 1 ? 2 : 1) +
                      ' to confirm a new random red position (press space to cancel).';
     } else {
-      // I am the confirmer — show popup
+      // I am the confirmer — set flag so space bar sends confirmation regardless
+      // of my local require_space_from_both_players setting
+      pending_confirmation = true;
       setTimeout(function() {
         alert('Player ' + data.requesting_seat + ' wants to add a random red position.\n' +
               'Press the space bar to confirm.');
@@ -368,6 +376,7 @@ function initSocket() {
 
   // random_added: both confirmed — add the site (server has already updated state)
   socket.on('random_cancelled', function() {
+    pending_confirmation = false;
     nf.innerHTML = 'Random red position request was not confirmed by the other player.';
   });
 
@@ -405,6 +414,7 @@ var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0
 var opacity = 0.5;
 var bond_lines = 0, line_width = 3;
 var require_space_from_both_players = 0; // when 1, both players must press space to add a random site
+var pending_confirmation = false; // true when this client has received a pending_random request and must confirm with space
 var ncyl_verts = 2*ncyl_phi;
 var n_cylinders = 7*19*nlevels, actual_n_cylinders = n_cylinders;
 var nsites = 19*nlevels, actual_nsites = nsites;
@@ -1895,7 +1905,9 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
     case 32: // space — add random red position (or confirm pending one)
       if (moves > 0) {
          nf.innerHTML = "Cannot add a random red position. The game has already started.";
-      } else if (socket && require_space_from_both_players) {
+      } else if (socket && (require_space_from_both_players || pending_confirmation)) {
+         // pending_confirmation: this client received a pending_random from the other
+         // player and must confirm via space_pressed regardless of local setting
          socket.emit('space_pressed', { seat: my_seat });
       } else {
          add_random_red_site();
