@@ -1,0 +1,2725 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>3D Hex</title>
+    <style>
+      body { margin: 0; padding: 0; overflow: hidden; }
+      canvas { display: block; }
+      pre { display: inline; }
+      #Parameters { font-size: 14px; font-family: monospace; margin: 8px 0; padding: 0; display: block; }
+    </style>
+  </head>
+  <body onload="main()">
+    <canvas id="webgl"></canvas>
+    <pre><p id="Parameters"></p></pre>
+    <p id="which curve"></p>
+    <p id="seat_banner" style="
+         position:fixed; top:0; right:10px;
+         font-family:monospace; font-size:14px;
+         background:rgba(0,0,0,.55); color:#eee;
+         padding:5px 12px; border-radius:0 0 6px 6px;
+         pointer-events:none;">connecting…</p>
+    <div id="chat_panel" style="
+         position:fixed; bottom:0; right:0; width:320px;
+         background:rgba(20,20,20,0.90); color:#eee;
+         font-family:monospace; font-size:14px;
+         border-top:1px solid #555; border-left:1px solid #555;
+         display:flex; flex-direction:column; z-index:1000;">
+      <div id="chat_header" style="
+           background:#333; padding:6px 10px; cursor:pointer;
+           user-select:none; font-weight:bold; font-size:14px;"
+           onclick="toggleChat()">&#x1F4AC; Chat (click to show/hide)</div>
+      <div id="chat_body" style="display:none; flex-direction:column;">
+        <div id="chat_log" style="
+             height:180px; overflow-y:auto; padding:4px 8px;
+             border-bottom:1px solid #444; font-size:14px;"></div>
+        <div style="display:flex; padding:6px; gap:6px;">
+          <input id="chat_input" type="text" placeholder="Type a message and press Enter…"
+                 style="flex:1; background:#222; color:#eee; border:1px solid #555;
+                        padding:4px 8px; font-family:monospace; font-size:14px;"
+                 onkeydown="chatKeydown(event)" />
+          <button onclick="sendChat()"
+                  style="padding:4px 10px; background:#444; color:#eee;
+                         border:1px solid #666; cursor:pointer; font-size:14px;">
+            Send</button>
+        </div>
+      </div>
+    </div>
+    <script src="webgl-utils.js"></script>
+    <script src="webgl-debug.js"></script>
+    <script src="cuon-utils.js"></script>
+    <script src="cuon-matrix_left.js"></script>
+    <!-- Socket.IO client — loaded from the same server.js host -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+// 3D_Hex  — multiplayer client layer
+// ══════════════════════════════════════════════════════════════════════════════
+// MULTIPLAYER LAYER
+// All shared-game-state mutations now go through the server.
+// Local display/camera variables are never sent to the server.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Will be set once Socket.IO connects
+var socket = null;
+var my_seat = null;          // 1 = red (2D player), 2 = green (1D player), null = spectator
+var tentative_move_pending = false; // true between cursor-hover set_bond_colors and a real move
+var my_move_in_flight = false;      // true after we emit a move, until state_update arrives
+                                    // prevents applyServerState from clobbering our local
+                                    // cylinder_colors which are already correct
+
+// ── Seat banner helper ──────────────────────────────────────────────────────
+function updateSeatBanner(msg) {
+  var el = document.getElementById('seat_banner');
+  if (el) el.textContent = msg;
+}
+
+// ── Refocus helper — returns keyboard focus to canvas after any alert() ────────
+// alert() steals focus to the browser's dialog. After OK is clicked the focus
+// stays on the dialog remnant, so keydown events (e.g. Enter) don't reach the
+// game. canvas.focus() restores focus immediately; tabIndex makes it focusable.
+function refocusCanvas() {
+  if (canvas) {
+    canvas.setAttribute('tabindex', '0');
+    canvas.focus();
+  }
+}
+
+// ── Turn notification helper ─────────────────────────────────────────────────
+// Uses the Web Notifications API so the alert appears even when this window
+// is in the background or does not have mouse focus.
+// Falls back to a prominent on-screen flash banner if permission is denied.
+var notifyPermissionRequested = false;
+function notifyTurn(msg) {
+  // Always update the status text
+  nf.innerHTML = msg;
+
+  // Show a temporary bright flash banner in the page itself (visible regardless
+  // of window focus) so keyboard-only users are always informed.
+  var banner = document.createElement('div');
+  banner.textContent = msg;
+  banner.style.cssText = 'position:fixed;top:8%;left:50%;transform:translateX(-50%);' +
+    'background:#ff0;color:#000;font-size:21px;font-family:monospace;font-weight:bold;' +
+    'padding:14px 36px;border:4px solid #f00;border-radius:12px;z-index:99999;' +
+    'text-align:center;box-shadow:0 0 30px rgba(0,0,0,0.5);';
+  document.body.appendChild(banner);
+  setTimeout(function() {
+    if (banner.parentNode) banner.parentNode.removeChild(banner);
+  }, 4000);
+
+  // Also try a system notification (works even if window is minimised)
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    new Notification('3D Hex — Your Turn', { body: msg, icon: '' });
+  } else if (Notification.permission !== 'denied' && !notifyPermissionRequested) {
+    notifyPermissionRequested = true;
+    Notification.requestPermission().then(function(perm) {
+      if (perm === 'granted')
+        new Notification('3D Hex — Your Turn', { body: msg, icon: '' });
+    });
+  }
+}
+
+// ── Apply a full state snapshot from the server ─────────────────────────────
+// Called on 'welcome' and 'state_update'.  Updates all shared variables and
+// triggers a redraw.
+function applyServerState(s) {
+  var prev_moves = moves;
+  var prev_random_sites = random_sites;
+  var prev_player = player;  // track whose turn it was before this update
+
+  actual_levels      = s.actual_levels;
+  redturns           = s.redturns;
+  saved_first_player = s.saved_first_player;
+  player             = s.player;
+  red_moves          = s.red_moves;
+  red_moves_incremented = s.red_moves_incremented;
+  moves              = s.moves;
+  random_sites       = s.random_sites;
+  winning_player     = s.winning_player;
+  move_active_level  = s.move_active_level;
+  move_active_k      = s.move_active_k;
+  undo_calls         = s.undo_calls;
+
+  // Board arrays — always copy sphere_colors.
+  var ns = 19 * actual_levels;
+  for (var ii = 0; ii < ns; ++ii)
+    sphere_colors[ii] = s.sphere_colors[ii];
+
+  // cylinder_colors: if WE just made the move, our local copy is already correct
+  // (set_bond_colors ran locally for immediate feedback).  Overwriting it with the
+  // server's pre-delta copy would wipe out the bond colours we just painted.
+  // The other player will get the correct colours via the cylinder_delta event.
+  if (!my_move_in_flight) {
+    var nc = 7 * ns;
+    for (var ii = 0; ii < nc; ++ii)
+      cylinder_colors[ii] = s.cylinder_colors[ii];
+  }
+  my_move_in_flight = false;  // clear the flag now that we have the ack
+
+  // If a new random red site was added, paint its bonds on the receiving client.
+  // The server now stores the site's level/k in move_active_level/move_active_k,
+  // so we can call set_bond_colors directly — no scan needed.
+  if (random_sites > prev_random_sites && !my_move_in_flight) {
+    pending_confirmation = false;  // confirmation completed
+    set_bond_colors(s.move_active_level, s.move_active_k, 1, 0);
+    nf.innerHTML = random_sites + " random red positions have been added";
+  }
+
+  // Sync active cursor and bond-site tables if a reset happened.
+  // When moves===0 arrives it means a new game has started — clear winning_player
+  // on ALL clients (not just the one who pressed Enter) so both screens reset.
+  if (moves === 0) {
+    winning_player     = 0;
+    actual_nsites      = 19 * actual_levels;
+    actual_n_cylinders = 7 * actual_nsites;
+    end_level          = actual_levels;
+    active_level       = Math.floor(actual_levels / 2);
+    active_k           = 0;
+    t_active_level     = active_level;
+    t_active_k         = 0;
+    tentative_move_pending = false;
+    for (var ci = 0; ci < actual_nsites; ++ci) sphere_colors[ci] = 0;
+    for (var ci = 0; ci < 7*actual_nsites; ++ci) cylinder_colors[ci] = 0;
+    nf.innerHTML = (player === 1)
+      ? 'New game. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
+      : 'New game. Green goes first.';
+    initSites();
+    make_bond_sites();
+    make_win_test_bond_sites();
+  }
+
+  // Run win test on BOTH clients whenever a new move has just been recorded.
+  // (In the tick loop this only ran on the moving player's client.)
+  if (moves > prev_moves && winning_player === 0) {
+    make_win_test_bond_sites();
+    var green_won = (player === 1) && depth_first_search(0);
+    var red_won   = (player === 2 || !red_moves_incremented) && !depth_first_search(1);
+    if (green_won) {
+      ++green_wins;
+      nf.innerHTML = "Green 1D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+                     ". Press Enter key to start over with current settings.";
+      alert('Green 1D player wins. Press Enter key to start over with current settings.');
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      refocusCanvas();
+      winning_player = 1;  // local flag so Enter key works
+      if (socket) socket.emit('win', { winning_player: 1 });
+    } else if (red_won) {
+      ++red_wins;
+      nf.innerHTML = "Red 2D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+                     ". Press Enter key to start over with current settings.";
+      alert('Red 2D player wins. Press Enter key to start over with current settings.');
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      refocusCanvas();
+      winning_player = 2;
+      if (socket) socket.emit('win', { winning_player: 2 });
+    }
+  }
+
+  // Update the status text (if no win)
+  if (winning_player === 0) {
+    if (player === 2) {
+      nf.innerHTML = 'Green turn';
+    } else {
+      nf.innerHTML = 'Remaining red turns: ' + Math.ceil(red_moves).toFixed(0);
+    }
+    // Notify the player whose turn it just became — but only when:
+    //   (a) the active player actually changed (red→green or green→red), AND
+    //   (b) this was NOT caused by an undo (s.undo_calls===1 means undo —
+    //       the undoing player already knows it's their turn, and the other
+    //       player should not be told it's now the undoing player's turn).
+    if (player !== prev_player && s.undo_calls === 0 &&
+        socket && my_seat !== null && my_seat === player) {
+      var turnMsg = (player === 1)
+        ? 'It is now your turn, Red. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
+        : 'It is now your turn, Green.';
+      notifyTurn(turnMsg);
+    }
+  }
+}
+
+// ── Chat helpers ─────────────────────────────────────────────────────────────
+var chatVisible = false;
+function toggleChat() {
+  chatVisible = !chatVisible;
+  document.getElementById('chat_body').style.display = chatVisible ? 'flex' : 'none';
+}
+function appendChatMsg(who, msg) {
+  var log = document.getElementById('chat_log');
+  var line = document.createElement('div');
+  line.style.cssText = 'padding:2px 0; border-bottom:1px solid #333;';
+  var color = who === 'Red' ? '#f88' : (who === 'Green' ? '#8f8' : '#aaa');
+  line.innerHTML = '<b style="color:' + color + '">' + who + ':</b> ' +
+                   msg.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+  if (!chatVisible) toggleChat(); // auto-open when message arrives
+}
+function sendChat() {
+  var input = document.getElementById('chat_input');
+  var msg = input.value.trim();
+  if (!msg || !socket) return;
+  socket.emit('chat', { msg: msg });
+  input.value = '';
+}
+function chatKeydown(ev) {
+  if (ev.key === 'Enter') { ev.stopPropagation(); sendChat(); }
+  ev.stopPropagation(); // prevent ALL keys in chat input reaching the game
+}
+
+// ── Initialise Socket.IO ─────────────────────────────────────────────────────
+function initSocket() {
+  socket = io();   // connects back to the server that served this page
+
+  socket.on('welcome', function(data) {
+    my_seat = data.seat;
+    if (my_seat === 1)      updateSeatBanner('You are RED  (seat 1)');
+    else if (my_seat === 2) updateSeatBanner('You are GREEN (seat 2)');
+    else                    updateSeatBanner('Spectator');
+    applyServerState(data.state);
+  });
+
+  socket.on('state_update', function(s) {
+    applyServerState(s);
+  });
+
+  // The other client finished set_bond_colors after a move and sends the delta
+  socket.on('cylinder_delta', function(cols) {
+    var nc = 7 * 19 * actual_levels;
+    for (var ii = 0; ii < nc; ++ii)
+      cylinder_colors[ii] = cols[ii];
+  });
+
+  // win_declared: the OTHER client detected the win and told the server;
+  // show the alert here too and set winning_player so Enter-key reset works.
+  socket.on('win_declared', function(data) {
+    if (winning_player > 0) return;  // we already detected it ourselves
+    winning_player = data.winning_player;
+    // setTimeout lets the browser activate this window before showing the alert,
+    // so it appears immediately without requiring a mouse-enter event.
+    setTimeout(function() {
+      if (winning_player === 1) {
+        ++green_wins;
+        nf.innerHTML = "Green 1D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+                       ". Press Enter key to start over with current settings.";
+        alert('Green 1D player wins. Press Enter key to start over with current settings.');
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      refocusCanvas();
+      } else {
+        ++red_wins;
+        nf.innerHTML = "Red 2D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+                       ". Press Enter key to start over with current settings.";
+        alert('Red 2D player wins. Press Enter key to start over with current settings.');
+      }
+      mouse_down = 0; dragging = false;
+    }, 0);
+  });
+
+  // undo_rejected: the server detected that another player moved first (race condition).
+  // Roll back the optimistic local undo and alert the player.
+  socket.on('undo_rejected', function(data) {
+    // Re-apply the move that was optimistically undone: restore sphere color and bonds.
+    sphere_colors[19*move_active_level + move_active_k] = 3 - player; // mover's color
+    set_bond_colors(move_active_level, move_active_k, 3 - player, 0);
+    undo_calls = 1;  // prevent further undo attempts
+    mouse_down = 0; dragging = false;
+    alert(data.message + '\nThe board has been restored.');
+  });
+
+  socket.on('chat', function(data) {
+    appendChatMsg(data.who, data.msg);
+  });
+
+  // seat_change: server tells clients who won the red bid and who is now green.
+  socket.on('seat_change', function(data) {
+    my_seat = (my_seat === data.red_seat) ? 1 : 2;
+    if (my_seat === 1) {
+      updateSeatBanner('You are RED  (seat 1) — won red bid');
+      nf.innerHTML = 'You won the red bid! You are now the Red player.';
+    } else {
+      updateSeatBanner('You are GREEN (seat 2)');
+      nf.innerHTML = 'The other player claimed Red. You are the Green player.';
+    }
+  });
+
+  socket.on('bid_rejected', function(data) {
+    nf.innerHTML = data.message;
+    alert(data.message);
+    mouse_down = 0; dragging = false;
+  });
+
+  // pending_random: server broadcasts this to BOTH clients when one presses space.
+  // The requesting player sees a waiting message; the other gets a popup.
+  socket.on('pending_random', function(data) {
+    if (my_seat === data.requesting_seat) {
+      // I am the requester — show waiting message
+      nf.innerHTML = 'Waiting for player ' + (my_seat === 1 ? 2 : 1) +
+                     ' to confirm a new random red position (press space to cancel).';
+    } else {
+      // I am the confirmer — set flag so space bar sends confirmation regardless
+      // of my local require_space_from_both_players setting
+      pending_confirmation = true;
+      setTimeout(function() {
+        alert('Player ' + data.requesting_seat + ' wants to add a random red position.\n' +
+              'Press the space bar to confirm.');
+        mouse_down = 0; dragging = false;
+        refocusCanvas();
+      }, 0);
+      nf.innerHTML = 'Press space to confirm adding a random red position.';
+    }
+  });
+
+  // random_added: both confirmed — add the site (server has already updated state)
+  socket.on('random_cancelled', function() {
+    pending_confirmation = false;
+    nf.innerHTML = 'Random red position request was not confirmed by the other player.';
+  });
+
+  socket.on('player_list', function(seats) {
+    var seated = seats.length;
+    if (seated < 2)
+      updateSeatBanner((my_seat ? 'You are seat ' + my_seat + '  ' : 'Spectator  ')
+                       + '— waiting for second player');
+    else if (my_seat === 1)
+      updateSeatBanner('You are RED  (seat 1)');
+    else if (my_seat === 2)
+      updateSeatBanner('You are GREEN (seat 2)');
+    else
+      updateSeatBanner('Spectator');
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END MULTIPLAYER LAYER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 3D_Hex
+
+var nlevels = 20, waiting_for_confirmation = 0;
+var saved_first_player = 1;
+var actual_levels = 9;
+var winning_player = 0; red_wins = 0; green_wins = 0, random_sites = 0;
+var redturns = 2, trianglefac = 1, red_moves = redturns, d1, d2, first_add;
+var jstart = 0, jend = 7;
+var ntheta = 17, nphi = 33;
+var ncyl_phi = 9;
+var frame = 0, db_cylinder_calls = 0;
+var global_debug = 0; // set to 1 to enable all console.log debug output
+var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0;
+var opacity = 0.5;
+var bond_lines = 0, line_width = 3;
+var require_space_from_both_players = 0; // when 1, both players must press space to add a random site
+var pending_confirmation = false; // true when this client has received a pending_random request and must confirm with space
+var ncyl_verts = 2*ncyl_phi;
+var n_cylinders = 7*19*nlevels, actual_n_cylinders = n_cylinders;
+var nsites = 19*nlevels, actual_nsites = nsites;
+let only_near_cursor = 0, display_context_bonds = 1;
+let near_level = 1;
+var context = 0;
+var yellow = 0;
+var sphere_vertices = ntheta*nphi;
+var sphere_triangles = 2*(ntheta-1)*(nphi-1); 
+var nverts = 72 + sphere_vertices + 2*ncyl_phi + 216 + n_cylinders*2 + 2*7;
+var n_normals = 72 + sphere_vertices + 2*ncyl_phi + 216;
+var tvstart = 72 + sphere_vertices + 2*ncyl_phi; // for triangles
+var tistart = 3*(44 + sphere_triangles + 2*(ncyl_phi - 1));
+var lvstart =  72 + sphere_vertices + 2*ncyl_phi + 216; // for all 7*nsites lines
+var listart = 3*(44 +sphere_triangles + 2*(ncyl_phi - 1) + 72);
+var fvstart = lvstart + 2*(7*nsites); // vertex index: forward bond verts follow all bond-line verts
+var fistart = listart + 2*(7*nsites); // index-array element: forward bond indices follow all bond-line indices
+var ntriangles = 44 + sphere_triangles + 2*(ncyl_phi - 1) + 72;
+var start_level = 0, end_level = actual_levels;
+var active_level = Math.floor(actual_levels/2), t_active_level = Math.floor(actual_levels/2);
+var active_k = 0, t_active_k = 0, moce_aclive_level = 0, move_active_k = 0;
+var active_i = 19*active_level + active_k;
+var sphere_colors = new Int16Array(nsites);
+var cylinder_colors = new Int16Array(n_cylinders).fill(0);
+var colors = [ [1., .9, .8, 1.], [1., 0., 0., 1.], [0., 1., .01, 1.],  [.5, .4, 0., 1.],
+               [1., 1., .0, 1.], [1., .5, 0., 1.], [.55, 1., 0., 1.],  [.6, .5, 0., 1.],
+               [1., .9, .8, 1.], [.7, 0., 0., 1.], [0., .7,  0., 1.],  [.5, .4, 0., 1.],
+               [1., .9, .8, 1.], [1., .6, .7, 1.], [.6,  1., .7, 1.],  [.7, .7, 1., 1.] ];
+var saved_cylinder_colors = new Int16Array(14).fill(0);
+var saved_active_bond_m = new Int16Array(14).fill(0);
+var vertices = new Float32Array(nverts*3);
+var normals = new Float32Array(n_normals*3);
+var indices = new Uint16Array(ntriangles*3 + n_cylinders*2 + 2*7);
+var bond_vector = [];
+var kind = 1, nf, old_active_level, old_active_k;
+var fov = 20;
+var moves = 0;
+var suppress_white_bonds = 0;
+var do_drawing_cylinder_output = 1, first_clip = 0;
+var do_tilt_z = 1, do_tilt_y = 1, show_outer_layer = 1, n_k = 19;
+var triangles = [ [0, 3], [0, 6], [1, 3], [1, 4], [1, 5], [1, 6],
+   [2, 3], [2, 4], [3, 4], [3, 6], [4, 5], [5, 6] ];
+var sites = [
+	0, 0, 0,
+	1, -1, -1,
+	-1, -1, 1,
+	-1, 1, -1,
+	1, 1, -1,
+	-1, 1, 1,
+	1, -1, 1,
+	2, -2, 0,
+	0, 2, -2,
+	2, 0, -2,
+	-2, 2, 0,
+	-2, 0, 2,
+	0, -2, 2,
+	3, -1, -1,
+	-1, 3, -1,
+	-1, -1, 3,
+	-3, 1, 1,
+	1, -3, 1,
+	1, 1, -3];
+var saved_sites = [
+	0, 0, 0,
+	1, -1, -1,
+	-1, -1, 1,
+	-1, 1, -1,
+	1, 1, -1,
+	-1, 1, 1,
+	1, -1, 1,
+	2, -2, 0,
+	0, 2, -2,
+	2, 0, -2,
+	-2, 2, 0,
+	-2, 0, 2,
+	0, -2, 2,
+	3, -1, -1,
+	-1, 3, -1,
+	-1, -1, 3,
+	-3, 1, 1,
+	1, -3, 1,
+	1, 1, -3];
+var move = [
+	 5,  3,  4,  1,  6,  2,
+	 0,  4,  9, 13,  7,  6,
+	11,  5,  0,  6, 12, 15,
+	10, 14,  8,  4,  0,  5,
+	 3,  8, 18,  9,  1,  0,
+	16, 10,  3,  0,  2, 11,
+	 2,  0,  1,  7, 17, 12,
+	 6,  1, 13, -1, -1, 17,
+	14, -1, -1, 18,  4,  3,
+	 4, 18, -1, -1, 13,  1,
+	-1, -1, 14,  3,  5, 16,
+	-1, 16,  5,  2, 15, -1,
+	15,  2,  6, 17, -1, -1,
+	 1,  9, -1, -1, -1,  7,
+	-1, -1, -1,  8,  3, 10,
+	-1, 11,  2, 12, -1, -1,
+	-1, -1, 10,  5, 11, -1,
+	12,  6,  7, -1, -1, -1,
+	 8, -1, -1, -1,  9,  4];
+var near = [
+	[ 0,  5,  3,  4,  1,  6,  2],
+	[ 1,  0,  4,  9, 13,  7,  6],
+	[ 2, 11,  5,  0,  6, 12, 15],
+	[ 3, 10, 14,  8,  4,  0,  5],
+	[ 4,  3,  8, 18,  9,  1,  0],
+	[ 5, 16, 10,  3,  0,  2, 11],
+	[ 6,  2,  0,  1,  7, 17, 12],
+	[ 7,  6,  1, 13, -1, -1, 17],
+	[ 8, 14, -1, -1, 18,  4,  3],
+	[ 9,  4, 18, -1, -1, 13,  1],
+	[10, -1, -1, 14,  3,  5, 16],
+	[11, -1, 16,  5,  2, 15, -1],
+	[12, 15,  2,  6, 17, -1, -1],
+	[13,  1,  9, -1, -1, -1,  7],
+	[14, -1, -1, -1,  8,  3, 10],
+	[15, -1, 11,  2, 12, -1, -1],
+	[16, -1, -1, 10,  5, 11, -1],
+	[17, 12,  6,  7, -1, -1, -1],
+	[18,  8, -1, -1, -1,  9,  4] ];
+var forward_bonds = [6, 0, 1, 9, 3, 5, 11];
+var all_bonds_in_order = [6, 0, 1, 9, 3, 5, 11, 4, 10, 12, 7, 8, 2, 13];
+var bond_sites = new Int16Array(14*19*nlevels).fill(-1);
+var full_bond_sites = new Int16Array(14*19*nlevels).fill(-1); // unclipped copy of bond_sites for context drawing
+var win_test_bond_sites = new Int16Array(14*19*nlevels).fill(-1);
+var move_index = new Int16Array([1, 5, 0, 0, 5, 4, 6]);
+var s3 = Math.sqrt(3.);
+var alpha = Math.atan2(1., Math.sqrt(2.))*180./Math.PI;
+var currentAngle = [0.0, 0.0]; // Current rotation angle ([x-axis, y-axis])
+var lastX = -1, lastY = -1;   // Last position of the mouse
+var dragging = false;
+var xrot = [0, 90, 0, alpha, alpha, alpha, alpha];
+var yrot = [ 0, 0, 0, 0, 0, 0, 0];
+var zrot = [0, 0, 90, 45, 135, 225, 315];
+var yscale = [2, 2, 2, s3, s3, s3, s3];
+var tx = 0., ty = 0., tz = 0., tstep = 0.1, r = 0.3, rsmall = .1, rstep = 0.02, r_cyl = .06;
+var dt = .011;
+var u = 0;
+let mouse_down, moved = 0, mouse_control_key = false, debug_matrix = 0;
+let dragX, dragY;
+var vpx = 0, vpy = 0, vpz = 65;
+var lookx = 0, looky = 0, lookz = 0;
+var a_position_constant, u_FragColor, a_Position, a_Normal, u_MvpMatrix, u_ModelMatrix,
+  u_NormalMatrix, u_DiffuseLight, u_LightDirection, u_AmbientLight, u_Color,
+  u_Viewpoint, u_v_Viewpoint, u_compute_color, u_PhongExponent, u_two_sided_normal;
+var total_rot = new Matrix4();
+var player = 1;
+let program_constant, program_phong, program_name; //  program name is a string for debugging
+/*
+let overtices = [
+     -1, -.5, 0.,
+     -1, 0., .5,
+     -1,  .5, 0.,
+     -1, 0., -.5,
+      0, -.5, 1,
+      .5, 0,  1,
+      0, .5,  1,
+      -.5, 0, 1,
+      0.,  1, .5,
+      .5,  1, 0,
+      0.,  1, -.5,
+      -.5, 1, 0];      
+*/
+// Vertex shader program
+var VSHADER_SOURCE_constant =
+  'attribute vec4 a_Position_constant;\n' +
+  'void main() {\n' +
+  '  gl_Position = a_Position_constant;\n' +
+  '}\n';
+
+// Constant color fragment shader program
+var FSHADER_SOURCE_constant =
+  'precision mediump float;\n' +
+  'uniform vec4 u_FragColor;\n' +
+  'void main() {\n' +
+  '  gl_FragColor = u_FragColor;\n' +
+  '}\n';
+
+var VSHADER_SOURCE_phong =
+  'attribute vec4 a_Position;\n' +
+  'attribute vec4 a_Normal;\n' +       // Normal
+  'uniform vec3 u_v_Viewpoint;\n' +
+  'uniform int u_two_sided_normal;\n' +
+  'uniform mat4 u_MvpMatrix;\n' +
+  'uniform mat4 u_ModelMatrix;\n' +   // Transformation matrix of vertices before perspective
+  'uniform mat4 u_NormalMatrix;\n' +   // Transformation matrix of the normal
+  'varying vec3 v_Normal;\n' +
+  'varying vec3 v_Position;\n' +
+  'void main() {\n' +
+  '  gl_Position = u_MvpMatrix * a_Position;\n' +
+  '  v_Position = vec3(u_ModelMatrix * a_Position);\n' +
+     // Recalculate the normal based on the model matrix and make its length 1.
+  '  v_Normal = normalize(vec3(u_NormalMatrix * a_Normal));\n' +
+  '  if (u_two_sided_normal > 0)\n' +
+  '    if (dot(u_v_Viewpoint - v_Position, v_Normal) < 0.)\n' +
+  '       v_Normal = -v_Normal;\n' +
+  '}\n';
+
+// Fragment shader program
+var FSHADER_SOURCE_phong =
+  'precision mediump float;\n' +
+  ///linear
+  'uniform vec3 u_DiffuseLight;\n' +   // Diffuse light color
+  'uniform vec3 u_LightDirection;\n' + // Diffuse light direction (in the world coordinate, normalized)
+  'uniform vec3 u_AmbientLight;\n' +   // Color of an ambient light
+  'uniform vec4 u_Color;\n' +       // Color
+  'uniform vec3 u_Viewpoint;\n' +
+  'uniform float u_PhongExponent;\n' +
+  'uniform int u_compute_color;\n' +
+  'varying vec3 v_Normal;\n' +
+  'varying vec3 v_Position;\n' +
+  'void main() {\n' +
+  ' if(u_compute_color == 0)\n'+
+  '  gl_FragColor = u_Color;\n' +
+  ' else {\n' +
+  '  vec3 normal = normalize(v_Normal);\n' +
+  '  float nDotL = max(dot(u_LightDirection, normal), 0.0);\n' +
+  // Calculate the color due to diffuse reflection
+  '  vec3 diffuse = .5*nDotL*u_DiffuseLight*vec3(u_Color);\n' +
+  // Calculate the color due to ambient reflection
+  '  vec3 ambient = u_AmbientLight*vec3(u_Color);\n' +
+  // Compute phong highlight;
+  '  vec3 refl = 2.*nDotL*normal - u_LightDirection;\n' +
+  '  vec3 view = normalize(u_Viewpoint - v_Position);\n' + 
+  '  float phong_dot = max(dot(refl, view), 0.0);\n' +
+  '  vec3 phong = .3*pow(phong_dot, u_PhongExponent)*u_DiffuseLight;\n' +
+  // Add the surface colors due to diffuse, phong, and ambient reflection
+  '  gl_FragColor = vec4(diffuse + ambient + phong, u_Color.a);\n' + 
+  ' }\n' +
+  '}\n';
+
+var canvas, gl; // hoisted so the resize handler can access them
+const text_line_height = 30; // enough for 14px text + padding
+function main() {
+  // Retrieve <canvas> element
+  canvas = document.getElementById('webgl');
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight - text_line_height;
+  nf = document.getElementById('Parameters');
+  if (player == 1)
+     nf.innerHTML = "First player is red 2D player";
+  else
+     nf.innerHTML = "First player is green 1D player";
+  // Get the rendering context for WebGL
+  gl = getWebGLContext(canvas, false);
+  // gl = getWebGLContext(canvas, true);
+  if (!gl) {
+    console.log('Failed to get the rendering context for WebGL');
+    return;
+  }
+  program_constant = createProgram(gl, VSHADER_SOURCE_constant, FSHADER_SOURCE_constant);
+  program_phong = createProgram(gl, VSHADER_SOURCE_phong, FSHADER_SOURCE_phong);
+  if (!program_phong || !program_constant) {
+    console.log('Failed to intialize shaders.');
+    return;
+    }
+  a_Position_constant = gl.getAttribLocation(program_constant, 'a_Position_constant');
+  u_FragColor = gl.getUniformLocation(program_constant, 'u_FragColor');
+  if (a_Position < 0) {
+    console.log('Failed to get the storage location of a_Position');
+    return -1;
+  }
+  if (u_FragColor < 0) {
+    console.log('Failed to get the storage location of u_FragColor');
+    return -1;
+  }
+
+  // Get the storage locations of uniform variables and so on
+  u_MvpMatrix = gl.getUniformLocation(program_phong, 'u_MvpMatrix');
+  u_ModelMatrix = gl.getUniformLocation(program_phong, 'u_ModelMatrix');
+  u_NormalMatrix = gl.getUniformLocation(program_phong, 'u_NormalMatrix');
+  u_DiffuseLight = gl.getUniformLocation(program_phong, 'u_DiffuseLight');
+  u_LightDirection = gl.getUniformLocation(program_phong, 'u_LightDirection');
+  u_AmbientLight = gl.getUniformLocation(program_phong, 'u_AmbientLight');
+  u_Color = gl.getUniformLocation(program_phong, 'u_Color');
+  u_compute_color = gl.getUniformLocation(program_phong, 'u_compute_color');
+  u_Viewpoint = gl.getUniformLocation(program_phong, 'u_Viewpoint');
+  u_v_Viewpoint = gl.getUniformLocation(program_phong, 'u_v_Viewpoint');
+  u_PhongExponent = gl.getUniformLocation(program_phong, 'u_PhongExponent');
+  u_two_sided_normal = gl.getUniformLocation(program_phong, 'u_two_sided_normal');
+  if (!u_MvpMatrix || !u_DiffuseLight || !u_LightDirection || !u_AmbientLight ||
+      !u_Color || !u_ModelMatrix || !u_NormalMatrix) {
+    console.log('Failed to get the storage location');
+    // return;
+    }
+  gl.lineWidth(line_width);
+  active_level = Math.floor(actual_levels/2);
+  active_k = 0;
+  initSites();
+  make_bond_sites();
+  make_win_test_bond_sites();
+  
+  // Set the vertex information
+  var n = initVertexBuffers(gl);
+  if (n < 0) {
+    console.log('Failed to set the vertex information');
+    return;
+  }
+
+	
+ canvas.onmousemove = function(ev) { // Mouse is moved; newer version.
+    var x = ev.clientX, y = ev.clientY;
+    var rect = ev.target.getBoundingClientRect();
+    // console.log("moving with button", ev.button, "control key", mouse_control_key);
+    if (mouse_down && rect.left + 3 <= x && x < rect.right -3 && rect.top + 3 <= y && y < rect.bottom - 3 /*&& mouse_control_key*/) {
+      var factor = 100/canvas.height; // The rotation ratio
+      var dx = factor * (x - lastX);
+      var dy = factor * (y - lastY);
+      // Limit x-axis rotation angle to -90 to 90 degrees
+      // currentAngle[0] = Math.max(Math.min(currentAngle[0] + dy, 90.0), -90.0);
+      currentAngle[0] = currentAngle[0] + dy;
+      currentAngle[1] = currentAngle[1] + dx;
+      // console.log("Current angle", currentAngle[0], currentAngle[1]);
+    }
+    else {
+      dragging = false;
+      mouse_down = 0;
+      }
+    lastX = x, lastY = y;
+  };
+ 
+
+  canvas.onmouseup = function(ev) { // mouse is released
+    dragging = false;
+    mouse_down = 0;
+    }
+
+  canvas.onmousedown = function(ev) {   // Mouse is pressed
+    var x = ev.clientX, y = ev.clientY;
+    var rect = ev.target.getBoundingClientRect();
+    if (rect.left <= x && x < rect.right && rect.top <= y && y < rect.bottom) {
+      mouse_down = 1;
+      mouse_control_key = ev.ctrlKey;
+      if (ev.button == 0) {
+      // If Clicked position is inside the <canvas>, update the selected surface
+      	let pixels = new Uint8Array(4); // Array for storing the pixel value
+      	let x_in_canvas = x - rect.left, y_in_canvas = rect.bottom - y;
+      	display(gl, 0);
+      	draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix,0);
+      	gl.readPixels(x_in_canvas, y_in_canvas, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      	let new_active_level = Math.floor(pixels[1]/2);
+      	let new_active_k = Math.floor(pixels[2]/2);
+      	if (new_active_level < actual_levels && new_active_k < 19) {
+      	    let i = 19*new_active_level + new_active_k;
+      	    let old_i = 19*t_active_level + t_active_k;
+      	    if(1)
+      if (global_debug) console.log("new_active_level", new_active_level, "new_active_k", new_active_k,
+	      "selected at position", x, y, "RGBA",
+              pixels[0]/255., pixels[1]/255., pixels[2]/255., pixels[3]/255.,
+              "site", 19*active_level + active_k, "i", i, "color", sphere_colors[i],
+              "old_i", old_i, "color", sphere_colors[old_i]);
+      	    old_active_level = active_level;
+      	    old_active_k = active_k;
+      	    if (new_active_level == active_level && new_active_k == active_k &&
+      	          sphere_colors[i] == 0) {
+      	       if (do_new_move() === false) return; // blocked (wrong turn etc); don't set mouse_down
+      	       }
+      	    else {
+      	      active_level = new_active_level;
+      	      active_k = new_active_k;
+      	      if(player == 1 && sphere_colors[i] != 2) {
+               if (global_debug) console.log("Player = 1 so active i changed to", "level", active_level,
+      	           "k", active_k);
+      	        active_i = 19*active_level + active_k;
+      	        }
+      	      draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix,1);
+      	      if (sphere_colors[old_i] == 0 && tentative_move_pending) {
+      	         restore_bond_colors(t_active_level, t_active_k);
+      	         tentative_move_pending = false;
+      	         }
+      	      if (sphere_colors[i] == 0) {
+      	         set_bond_colors(active_level, active_k, player, 1);
+      	         tentative_move_pending = true;
+      	         }
+      	      }
+      	    t_active_k = new_active_k;
+      	    t_active_level = new_active_level;
+      	    }
+      	draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix,1);
+      	if (true || i >= 0 && i < nsites) {
+         mouse_down = 1;
+         }
+        do_drawing_cylinder_output = 1;
+      	display(gl, 1);
+      	dragging = false;
+      	}
+      else {
+        lastX = x; lastY = y;
+	dragX = x; dragY = y;
+        dragging = true;
+        }
+      }
+    else
+       dragging = false;
+    }
+
+  // Set the clear color and enable the depth test
+  gl.clearColor(0.1, 0.2, 0.8, 1.0);
+  gl.enable(gl.DEPTH_TEST);
+
+  // Set the light color (white)
+  gl.useProgram(program_phong);
+  program_name = "program_phong";
+  gl.uniform3f(u_DiffuseLight, 1.0, 1.0, 1.0);
+  // Set the light direction (in the world coordinate)
+  var lightDirection = new Vector3([0.5, 1.0, 1.0]);
+  lightDirection.normalize();     // Normalize
+  gl.uniform3fv(u_LightDirection, lightDirection.elements);
+  // Set the ambient light
+  gl.uniform3f(u_AmbientLight, 0.35, 0.35, 0.35);
+  gl.uniform4f(u_Color, 1.0, 0.9, 0.8, 1.0);
+  gl.uniform3f(u_Viewpoint, vpx, vpy, vpz);
+  gl.uniform3f(u_v_Viewpoint, vpx, vpy, vpz);
+  gl.uniform1f(u_PhongExponent, 9.);
+ 
+  // Calculate the view projection matrix
+  var mvpMatrix = new Matrix4();  // Model view projection matrix
+  var NormalMatrix = new Matrix4();  // Model view projection matrix
+  mvpMatrix.setPerspective(fov, canvas.width / canvas.height, 1, 100);
+  mvpMatrix.lookAt(vpx, vpy, vpz, lookx, looky, lookz, 0, 1, 0);
+  // mvpMatrix.multiply(total_rot);
+  NormalMatrix.setIdentity;
+  // Pass the model view projection matrix to the variable u_MvpMatrix and u_NormalMatrix
+  gl.uniformMatrix4fv(u_MvpMatrix, false, mvpMatrix.elements);
+  gl.uniformMatrix4fv(u_ModelMatrix, false, g_modelMatrix.elements);
+  gl.uniformMatrix4fv(u_NormalMatrix, false, NormalMatrix.elements);
+
+ 
+  // Register the event handler — skip game keys when chat input is focused
+  document.onkeydown = function(ev) {
+    if (document.activeElement && document.activeElement.id === 'chat_input') return;
+    keydown(ev, gl);
+  };
+
+  // Scroll wheel: zoom in (wheel up) / out (wheel down), matching 'p' and 'o' keys.
+  // { passive: false } lets us call preventDefault() to stop the page scrolling.
+  canvas.addEventListener('wheel', function(ev) {
+    ev.preventDefault();
+    if (ev.deltaY < 0)
+      fov -= .5;   // wheel up -> zoom in (narrow FOV), same as 'p'
+    else
+      fov += .5;   // wheel down -> zoom out (widen FOV), same as 'o'
+  }, { passive: false });
+
+  // Start multiplayer socket connection
+  initSocket();
+
+  var tick = function() {   // Start drawing
+    if (moved && !mouse_down)
+	 	moved = 0;
+    if (global_debug && db_cylinder_calls)
+     if (global_debug) console.log("tick", frame);
+    if (new_move) {
+       new_move = 0;
+       // In multiplayer mode the win test runs in applyServerState() on both
+       // clients simultaneously.  Only run it here for single-player / offline.
+       if (!socket) {
+         make_win_test_bond_sites();
+         if (player == 1 && depth_first_search(0)) { // previous move was by green player 2
+            ++green_wins;
+            nf.innerHTML = "Green 1D player wins. Red wins "+ red_wins+", green wins "+green_wins+". Press Enter key to start over with current settings.";
+            alert('Green 1D player wins. Press Enter key to start over with current settings.');
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      refocusCanvas();
+            winning_player = 1;
+            }
+         if ((player == 2 || !red_moves_incremented) && !depth_first_search(1)) { // previous move was by red player 1
+            ++red_wins;
+            nf.innerHTML = "Red 2D player wins. Red wins "+red_wins+", green wins "+green_wins+". Press Enter key to start over with current settings.";
+            alert("Red 2D player wins. Press Enter key to start over with current settings.");
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      refocusCanvas();
+            winning_player = 2;
+            }
+         }
+       }
+    // Calculate the view projection matrix
+    // Assign to the outer mvpMatrix (no 'var') so onmousedown picking always
+    // uses the up-to-date matrix, not the stale one computed at startup.
+    mvpMatrix = new Matrix4();
+    var NormalMatrix = new Matrix4();
+    mvpMatrix.setPerspective(fov, canvas.width / canvas.height, 1, 100);
+    mvpMatrix.lookAt(vpx, vpy, vpz, lookx, looky, lookz, 0, 1, 0);
+    // mvpMatrix.multiply(total_rot);
+    NormalMatrix.setIdentity;
+    // Pass the model view projection matrix to the variable u_MvpMatrix and u_NormalMatrix
+    gl.uniformMatrix4fv(u_MvpMatrix, false, mvpMatrix.elements);
+    gl.uniformMatrix4fv(u_ModelMatrix, false, g_modelMatrix.elements);
+    gl.uniformMatrix4fv(u_NormalMatrix, false, NormalMatrix.elements);
+    draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix);
+
+    requestAnimationFrame(tick, canvas);
+  };
+  tick();
+}
+
+function cross(a, b) {
+   return [ a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0] ];
+   }
+   
+function initSites() {
+  for (let i = 0; i < 19; ++i)
+        for (let k = 0; k < 3; ++k)
+           sites[k + 3*i] = saved_sites[k + 3*i]
+  for (let j = 0; j < actual_levels; ++j)
+     for (let i = 0; i < 19; ++i)
+        for (let k = 0; k < 3; ++k)
+           sites[k + 3*(i + 19*j)] = sites[k + 3*i] + j - (actual_levels-1)/4.;
+  for (let i = 0; i < 19; ++i)
+        for (let k = 0; k < 3; ++k)
+           sites[k + 3*i] = sites[k + 3*i] - (actual_levels-1)/4.;
+  }
+
+const opositions = [];
+const onormals = [];
+const oindices = [];
+  
+function buildGeometry() {   // Code received from Claude, June 18, 2026
+  // The 24 unique corner positions of the truncated octahedron solid.
+  const corners = [];
+  const base = [0, 1, 2];
+  function permutations(arr) {
+    if (arr.length <= 1) return [arr];
+    const result = [];
+    for (let i = 0; i < arr.length; i++) {
+      const rest = arr.slice(0, i).concat(arr.slice(i + 1));
+      for (const p of permutations(rest)) {
+        result.push([arr[i]].concat(p));
+      }
+    }
+    return result;
+  }
+  const seen = new Set();
+  for (const perm of permutations(base)) {
+    const signOptions = perm.map(v => (v === 0 ? [0] : [v, -v]));
+    for (const sx of signOptions[0]) {
+      for (const sy of signOptions[1]) {
+        for (const sz of signOptions[2]) {
+          const key = sx + ',' + sy + ',' + sz;
+          if (!seen.has(key)) {
+            seen.add(key);
+            corners.push([sx, sy, sz]);
+          }
+        }
+      }
+    }
+  }
+  // corners.length === 24
+
+  function findCorner(x, y, z) {
+    for (let i = 0; i < corners.length; i++) {
+      const c = corners[i];
+      if (c[0] === x && c[1] === y && c[2] === z) return i;
+    }
+    throw new Error('corner not found: ' + x + ',' + y + ',' + z);
+  }
+
+  // Order a face's corner indices counter-clockwise as seen from
+  // outside the solid (i.e. looking down -normal), via angle sort
+  // around the face centroid in the face's own plane.
+  function orderFace(indices, normal) {
+    const pts = indices.map(i => corners[i]);
+    const n = pts.length;
+    const center = [0, 0, 0];
+    for (const p of pts) { center[0] += p[0]; center[1] += p[1]; center[2] += p[2]; }
+    center[0] /= n; center[1] /= n; center[2] /= n;
+
+    function sub(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+    function cross(a, b) {
+      return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+    }
+    function dot(a, b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+    function norm(a) { const l = Math.sqrt(dot(a,a)); return [a[0]/l, a[1]/l, a[2]/l]; }
+
+    let u = norm(sub(pts[0], center));
+    let v = norm(cross(normal, u));
+
+    const angles = pts.map(p => {
+      const d = sub(p, center);
+      return Math.atan2(dot(d, v), dot(d, u));
+    });
+    const order = indices.map((_, k) => k).sort((a, b) => angles[a] - angles[b]);
+    let ordered = order.map(k => indices[k]);
+
+    // Ensure outward winding: (p1-p0) x (p2-p0) should align with normal
+    const p0 = corners[ordered[0]], p1 = corners[ordered[1]], p2 = corners[ordered[2]];
+    const cr = cross(sub(p1, p0), sub(p2, p0));
+    if (dot(cr, normal) < 0) ordered = ordered.reverse();
+    return ordered;
+  }
+
+  // Collect faces as { normal, cornerIndices(ordered) }
+  const faces = [];
+
+  // 6 squares: one coordinate is ±2
+  for (let axis = 0; axis < 3; ++axis) {
+    for (const sign of [2, -2]) {
+      const normal = [0, 0, 0];
+      normal[axis] = sign > 0 ? 1 : -1;
+      const idx = [];
+      for (let i = 0; i < corners.length; i++) {
+        if (corners[i][axis] === sign) idx.push(i);
+      }
+      faces.push({ normal: normal, corners: orderFace(idx, normal) });
+    }
+  }
+
+  // 8 hexagons: perpendicular to (±1,±1,±1), the 6 farthest vertices
+  // in that direction (dot product maximal) form the hexagon.
+  for (const sx of [1, -1]) {
+    for (const sy of [1, -1]) {
+      for (const sz of [1, -1]) {
+        const dir = [sx, sy, sz];
+        const dots = corners.map(c => c[0]*dir[0] + c[1]*dir[1] + c[2]*dir[2]);
+        const mx = Math.max(...dots);
+        const idx = [];
+        for (let i = 0; i < corners.length; i++) {
+          if (Math.abs(dots[i] - mx) < 1e-9) idx.push(i);
+        }
+        const len = Math.sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+        const normal = [dir[0]/len, dir[1]/len, dir[2]/len];
+        faces.push({ normal: normal, corners: orderFace(idx, normal) });
+      }
+    }
+  }
+
+
+  // Build the flat-shaded vertex/normal/index buffers. Each
+  // face gets its own private set of vertices so its normal (and
+  // color) is constant across the face -- this is what gives the
+  // hard-edged "flat shaded" faceted look.
+
+  let vbase = 0;
+  for (const face of faces) {
+    const n = face.normal;
+    const isSquare = face.corners.length === 4;
+
+    for (const ci of face.corners) {
+      const c = corners[ci];
+      opositions.push(c[0], c[1], c[2]);
+      onormals.push(n[0], n[1], n[2]);
+
+    }
+
+    // Fan-triangulate the (already convex, ordered) polygon.
+    const m = face.corners.length;
+    for (let k = 1; k < m - 1; ++k) {
+      oindices.push(vbase, vbase + k, vbase + k + 1);
+    }
+    vbase += m;
+  }
+if (global_debug) console.log("opositions", opositions.length, "onormals", onormals.length,
+    "oindices", oindices.length);
+}
+
+function depth_first_search(kind) {  // determine connectness from level 0 to level actual_levels-1
+   var i, j, k, l, m, mm, n, temp_m, db_dfs = 0;
+   var stack = []; // last in first out for depth first search
+   if (global_debug && db_dfs && kind)
+    if (global_debug) console.log("Beginning DFS");
+   var visited = new Int16Array(nsites).fill(0); // initialize to unvisited
+   for (k = 0; k < 19; ++k) // push all acceptable cells on layer 0 onto stack
+      if (sphere_colors[k] == 2 ||
+            kind == 1 && sphere_colors[k] == 0) {  // green, or else unclaimed if kind == 1
+         stack.push(k);
+         if (global_debug && db_dfs && kind)
+            if (global_debug) console.log(" Pushing level 0 k", k, "of color", sphere_colors[k], "onto stack");
+         }
+   while (stack.length > 0) {
+      j = stack.pop();
+      if (!visited[j]) {
+         visited[j] = 1;
+         if (global_debug && db_dfs && kind)
+            if (global_debug) console.log("  visiting level", Math.floor(j/19.),"k",j-19*Math.floor(j/19.) );
+         for (m = 0; m < 14; ++m) {
+           mm = all_bonds_in_order[m];
+           n = win_test_bond_sites[14*j + mm]; // do most forward bonds first
+           if (n >= 0 && (sphere_colors[n] == 2 ||
+               kind == 1 && sphere_colors[n] == 0)) {  // green, or else unclaimed if kind == 1
+                 stack.push(n);
+              if (Math.ceil((n+1)/19.) >= actual_levels) { // reached the last level
+                 if (global_debug && db_dfs && kind)
+                   if (global_debug) console.log(" Returning true at level", 
+                      Math.floor(n/19.),"k",n-19*Math.floor(n/19.) );
+                 return true;
+                 }
+              }
+            }
+         }  
+      }
+   return false; 
+   }
+
+function display(gl, kind) {
+	// set all tansform matrices to the identity
+   var NormalMatrix = new Matrix4();  // Model view projection matrix
+	 NormalMatrix.setIdentity;
+	 gl.uniformMatrix4fv(u_MvpMatrix, false, NormalMatrix.elements);
+   gl.uniformMatrix4fv(u_ModelMatrix, false, NormalMatrix.elements);
+
+   gl.uniform3f(u_DiffuseLight, 1.0, 1.0, 1.0);
+   gl.uniform3f(u_AmbientLight, 0.35, 0.35, 0.35);
+	 gl.uniform4f(u_Color, 1.0, 0.9, 0.8, 1.0);
+   }
+
+function initVertexBuffers(gl) {
+  // Create a sphere
+   var i, j, k, l, m, n, lph, lth, lthph, theta, phi, debug = 0, dbb = 1;
+   var centroid = [0, 0, 0];
+   var ctheta = new Float32Array(ntheta);
+   var stheta = new Float32Array(ntheta);
+   var cphi = new Float32Array(nphi);
+   var sphi = new Float32Array(nphi);
+   var cyl_cphi = new Float32Array(nphi);
+   var cyl_sphi = new Float32Array(nphi);
+
+ // create octahedron geometry using program gotten from Claude on June 18, 2026
+   buildGeometry();
+ // copy octahedron geometry before spheres, cylinders, triangles, and lines
+   for (i = 0; i < 3*72; ++i) {
+      vertices[i] = .52*opositions[i];
+      normals[i] = onormals[i];
+      }
+   for (i = 0; i < 3*44; ++i)
+      indices[i] = oindices[i];
+         
+   // pre-compute sines and cosines
+   for (i = 0; i < ntheta; ++i) {
+      theta = i*Math.PI/(ntheta - 1);
+      stheta[i] = Math.sin(theta);
+      ctheta[i] = Math.cos(theta);
+      }
+   for (i = 0; i < nphi; ++i) {
+      phi = i*2*Math.PI/(nphi - 1);
+      sphi[i] = Math.sin(phi);
+      cphi[i] = Math.cos(phi);
+      }
+   for (i = 0; i < ncyl_phi; ++i) {
+      phi = i*2*Math.PI/(ncyl_phi - 1);
+      cyl_sphi[i] = Math.sin(phi);
+      cyl_cphi[i] = Math.cos(phi);
+      }
+   // compute vertices and normals to the unit sphere using spherical coordinates
+   for (i = 0; i < ntheta; ++i) {
+      for (j = 0; j < nphi; ++j) {
+         k = 3*(72 + nphi*i + j);
+         vertices[k  ] = stheta[i]*cphi[j];
+         vertices[k+2] = stheta[i]*sphi[j];
+         vertices[k+1] = ctheta[i];
+         normals[k  ] = stheta[i]*cphi[j];
+         normals[k+2] = stheta[i]*sphi[j];
+         normals[k+1] = ctheta[i];
+         }
+      }
+   for (i = 0; i < ntheta-1; ++i) { // triangles for sphere
+      for (j = 0; j < nphi-1; ++j) {
+         k = 3*44 + 6*((nphi-1)*i + j);
+         l = 72 + nphi*i + j;
+         lph = l + 1;
+         lth = l + nphi;
+         lthph = lth + 1;
+         indices[k  ] = l;
+         indices[k+1] = lph;
+         indices[k+2] = lth;
+         indices[k+3] = lth;
+         indices[k+4] = lph;
+         indices[k+5] = lthph;
+         }
+      }
+   // compute vertices and normals to the unit cylinder using spherical coordinates
+   for (j = 0; j < ncyl_phi; ++j) {
+      k = 6*j + 3*(72 + sphere_vertices);
+      vertices[k  ] = cyl_cphi[j];
+      vertices[k+2] = cyl_sphi[j];
+      vertices[k+1] = 0;
+      normals[k  ] = cyl_cphi[j];
+      normals[k+2] = cyl_sphi[j];
+      normals[k+1] = 0;
+      vertices[k+3] = cyl_cphi[j];
+      vertices[k+5] = cyl_sphi[j];
+      vertices[k+4] = 1.;
+      normals[k+3] = cyl_cphi[j];
+      normals[k+5] = cyl_sphi[j];
+      normals[k+4] = 0;
+      // console.log(k, vertices[k  ], vertices[k+1], vertices[k+2]);
+      // console.log(k + 3, vertices[k+3], vertices[k+4], vertices[k+5]);
+      }
+   for (j = 0; j < ncyl_phi-1; ++j) {  // triangles for cylinder
+      k = 6*j + 3*(44 + sphere_triangles);
+      l = 72 + sphere_vertices + 2*j;
+      lph = l + 1;
+      lth = l + 2;
+      lthph = lth + 1;
+      indices[k  ] = l;
+      indices[k+1] = lph;
+      indices[k+2] = lth;
+      indices[k+3] = lth;
+      indices[k+4] = lph;
+      indices[k+5] = lthph;
+      }
+      
+   let tnormal = [], kk, dbg = 0, a = [], b = [], c = [], d = [],
+      kistart = 0, otrianglefac = 1.-trianglefac;
+   for (n = 0; n < 12; ++n) {  // for flat triangles
+      i = triangles[n][0];
+      j = triangles[n][1];
+      k = 3*(tvstart + 3*n);
+      vertices[k  ] = 0;
+      vertices[k+1] = 0;
+      vertices[k+2] = 0;
+      for (l = 0; l < 3; ++l) {
+         vertices[k + 3 + l] = bond_vector[3*i + l];
+         vertices[k + 6 + l] = bond_vector[3*j + l];
+         centroid[l] = (bond_vector[3*i + l] + bond_vector[3*j + l])/3.;
+         }
+      for (let kv = 3*(tvstart + 3*n); kv < 3*(tvstart + 3*n + 3); kv += 3)
+       for (l = 0; l < 3; ++l) 
+        vertices[kv + l] = trianglefac*vertices[kv + l] + otrianglefac*centroid[l];
+      kk = tistart + 3*n;
+      kistart = tvstart + 3*n;
+      for (l = 0; l < 3; ++l) {
+        indices[kk + l] = kistart + l;
+        a[l] = bond_vector[3*i + l];
+        b[l] = bond_vector[3*j + l];
+        }
+      tnormal = cross(a, b);
+      for (l = 0; l < 3; ++l)
+         for (m = 0; m < 3; ++m)
+            normals[k + 3*l + m] = tnormal[m];
+      if (global_debug && dbg) {
+          if (global_debug) console.log("triangle", n, "k", k, "normal", tnormal[0], tnormal[1], tnormal[2]);
+          if (global_debug) console.log("  vertex 1:   ", vertices[k], vertices[k+1], vertices[k+2]);
+          if (global_debug) console.log("  vertex 2:   ", vertices[k+3], vertices[k+4], vertices[k+5]);
+          if (global_debug) console.log("  vertex 3:   ", vertices[k+6], vertices[k+7], vertices[k+8]);
+          if (global_debug) console.log("  kk", kk, "indices", indices[kk], indices[kk+1], indices[kk]+2);
+          }
+      }
+      
+      for (i = 0; i < nsites; ++i) 
+         for (j = 0; j < 7; ++j) {
+           m = 14*i + j;
+           n =  7*i + j;
+           mm = bond_sites[m];
+           if (mm < 0) continue;
+           k = listart + 2*n;
+           l = 3*lvstart + 6*n;
+           for (nn = 0; nn < 3; ++nn) {
+             vertices[l + nn] = sites[3*i + nn];
+             vertices[l + nn + 3] = sites[3*mm + nn];
+             }
+           indices[k] = lvstart + 2*n;
+           indices[k+1] = lvstart + 2*n + 1;
+           if (global_debug && dbb && i < 20) {
+              if (global_debug) console.log("i", i, "j", j, "m", m, "n", n, "k", k, "l", l);
+              let kk = indices[k], k1 = indices[k+1];
+              if (global_debug) console.log("   ", kk, vertices[3*kk], vertices[3*kk + 1], vertices[3*kk + 2]);
+              if (global_debug) console.log("   ", k1, vertices[3*k1], vertices[3*k1 + 1], vertices[3*k1 + 2]);
+              }
+           }
+       // make the 7 forward bonds from the  central active site
+       
+        i = 19*active_level + active_k;
+        for (jj = 0; jj < 7; ++jj) {
+           j = forward_bonds[jj];
+           mm = 14*i + j;
+           n = bond_sites[mm];
+           l = 3*fvstart + 6*jj;
+           for (nn = 0; nn < 3; ++nn) {
+             vertices[l + nn] = sites[3*i + nn];
+             vertices[l + nn + 3] = sites[3*n + nn];
+             }
+           k = fistart + 2*jj;
+           indices[k] = fvstart + 2*jj;
+           indices[k+1] = fvstart + 2*jj + 1;
+           if (global_debug) console.log("i", i, "jj", jj, "l", l, "k", k, "fistart + 2*jj", fvstart + 2*jj);
+           }
+	// Write the vertex property to buffers (coordinates, colors and normals)
+	if (!initArrayBuffer(gl, 'a_Position', vertices, 3)) return -1;
+	if (!initArrayBuffer(gl, 'a_Normal', normals, 3)) return -1;
+
+	// Unbind the buffer object
+	gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+	// Write the indices to the buffer object
+	var indexBuffer = gl.createBuffer();
+	if (!indexBuffer) {
+  		console.log('Failed to create the buffer object');
+   	return false;
+ 		}
+	gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+	gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+	if (debug) {
+  if (global_debug) console.log("Vertices");
+		for (i = 0; i < nverts; ++i)
+   if (global_debug) console.log(i, "   ", vertices[3*i], vertices[3*i + 1], vertices[3*i + 2]);
+  if (global_debug) console.log("Triangles");
+		for (i = 0; i < ntriangles; ++i)
+   if (global_debug) console.log(i, "   ", indices[3*i], indices[3*i + 1], indices[3*i + 2]);
+		}
+	return indices.length;
+}
+
+function undo() {
+        if (socket) {
+          // Apply locally for immediate feedback, then tell the server.
+          // Send the current move count so the server can detect race conditions
+          // (another player moved between when we saw the state and sent the undo).
+          sphere_colors[19*move_active_level + move_active_k] = 0;
+          restore_bond_colors(move_active_level, move_active_k);
+          socket.emit('undo', { expected_moves: moves });
+          socket.emit('cylinder_delta', Array.from(cylinder_colors));
+        } else {
+          // offline fallback
+	  sphere_colors[19*move_active_level + move_active_k] = 0;
+	  restore_bond_colors(move_active_level, move_active_k);
+	  if(player == 1 && red_moves_incremented) {
+	     player = 2;
+	     nf.innerHTML = "Green turn";
+	     }
+	  else {
+	     player = 1;
+	     if (red_moves_incremented)
+	        red_moves -= redturns;
+	     red_moves = red_moves + 1;
+	     nf.innerHTML = "Red turn. Remaining red turns: " +
+                  Math.ceil(red_moves).toFixed(0);
+             }
+          undo_calls = 1;
+          }
+        }
+        
+function do_new_move() {
+        // In multiplayer mode, send the move to the server.
+        // The server validates it, updates the authoritative state, and
+        // broadcasts state_update to both clients.
+        // We also run set_bond_colors locally for immediate visual feedback
+        // and send the resulting cylinder_colors as a delta.
+        if (socket) {
+          if (my_seat === null) {
+            nf.innerHTML = "Spectators cannot make moves.";
+            return false;
+          }
+          // Enforce turns: seat 1 = red (player 1), seat 2 = green (player 2)
+          if (my_seat !== player) {
+            alert("It is not your turn, please wait.");
+            mouse_down = 0; dragging = false;
+      refocusCanvas();
+            return false;  // signal to caller not to set mouse_down = 1
+          }
+          // Optimistic local update (visual only — authoritative copy comes from server)
+          new_move = 1;
+          do_drawing_cylinder_output = 1;
+          // If there was a tentative (cursor-hover) bond colour preview, clear it first
+          if (tentative_move_pending) {
+            restore_bond_colors(active_level, active_k);
+            tentative_move_pending = false;
+          }
+          sphere_colors[19*active_level + active_k] = player;
+          set_bond_colors(active_level, active_k, player, 0);
+          my_move_in_flight = true;   // stop applyServerState clobbering cylinder_colors
+          first_add = 4;
+          // Tell the server
+          socket.emit('move', { level: active_level, k: active_k });
+          // Send the cylinder_colors delta so the other player sees bonds
+          socket.emit('cylinder_delta', Array.from(cylinder_colors));
+        } else {
+          // Single-player / offline fallback (original logic)
+	  move_active_level = active_level;
+	  move_active_k = active_k;
+          undo_calls = 0;
+          new_move = 1;
+          do_drawing_cylinder_output = 1;
+          sphere_colors[19*active_level + active_k] = player;
+          set_bond_colors(active_level, active_k, player, 0);
+          if (player == 1) {
+             red_moves = red_moves - 1;
+             nf.innerHTML = "Remaining red turns: " +
+                  Math.ceil(red_moves).toFixed(0);
+             if (red_moves <= 0) {
+                red_moves += redturns;
+                red_moves_incremented = 1;
+                nf.innerHTML = "Green turn";
+                player = 2;
+                }
+             else
+                red_moves_incremented = 0;
+             }
+          else {
+             player = 1;
+             nf.innerHTML = "Remaining red turns: " +
+                  Math.ceil(red_moves).toFixed(0);
+             }
+          if (global_debug) console.log("red_moves", red_moves);
+          ++moves;
+          first_add = 4;
+          }
+        }
+        
+function add_random_red_site() {
+   let level = Math.floor(actual_levels*Math.random());
+   let k = Math.floor(19*Math.random());
+   while (sphere_colors[19*level + k] != 0) {
+      level = Math.floor(actual_levels*Math.random());
+      k = Math.floor(19*Math.random());
+      }
+   if (socket) {
+     socket.emit('setup', { add_random: { level, k } });
+   } else {
+     sphere_colors[19*level + k] = 1;   // always red, regardless of whose turn it is
+     set_bond_colors(level, k, 1, 0);
+     ++random_sites;
+     nf.innerHTML = random_sites+" random red positions have been added";
+     }
+   }
+   
+function adjust_bond_sites(expand) {
+   if (show_outer_layer || expand) {
+      make_bond_sites();
+      }
+   clip_bond_sites();
+   }
+        
+function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
+  if (global_debug) console.log("key code", ev.keyCode);
+  mouse_control_key = ev.ctrlKey;
+  switch (ev.keyCode) {
+      case 38: // Up arrow key -> translate right
+      ty += tstep;
+      if (global_debug) console.log("ty", ty);
+      break;
+    case 40: // Down arrow key -> translate left
+      ty -= tstep;
+      if (global_debug) console.log("ty", ty);
+      break;
+    case 39: // Right arrow key -> translight right
+      tx += tstep;
+      if (global_debug) console.log("tx", tx);
+      break;
+    case 37: // Left arrow key -> translate left
+      tx -= tstep;
+      if (global_debug) console.log("tx", tx);
+      break;
+    case 47: // slash '/'
+    case 191: // my laptop's '?' key: switch first player
+      //console.log("key code", ev.keyCode);
+      alert("to switch first player type Enter; otherwise continue the game");
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+         waiting_for_confirmation = 1;
+      break;
+    case  8: // backspace: cancel previous move
+      if (undo_calls == 0) {
+         // In multiplayer, only the player who made the last move may undo it.
+         // After a move player has already switched, so the mover was (3-player).
+         if (socket && my_seat !== null && my_seat !== (3 - player)) {
+           alert("You can only undo your own moves.");
+           mouse_down = 0; dragging = false;
+      refocusCanvas();
+           break;
+           }
+         alert("to cancel previous move type Enter; otherwise continue the game");
+         mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+         waiting_for_confirmation = 2;
+         }
+      break;
+    case 81: // 'q' increase active level
+      if (active_level < actual_levels-1) {
+        restore_bond_colors(active_level, active_k);
+      	active_level += 1;
+      	t_active_level += 1;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 87: // 'w' decrease active level
+      if (active_level > 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_level -= 1;
+      	t_active_level -= 1;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 69: // 'e' move upper right in layer
+      if (move[6*active_k] >= 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_k = move[6*active_k];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 82: // 'r' move lower left in layer
+      if (move[6*active_k+3] >= 0) {
+        restore_bond_colors(active_level, active_k);  
+      	active_k = move[6*active_k+3];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 84: // 't' move up in layer
+      if (move[6*active_k+1] >= 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_k = move[6*active_k+1];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 89: // 'y' move down in layer
+      if (move[6*active_k+4] >= 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_k = move[6*active_k+4];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 85: // 'u' move upper left in layer
+      if (move[6*active_k+2] >= 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_k = move[6*active_k+2];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 73: // 'i' move lower right in layer
+      if (move[6*active_k+5] >= 0) {
+        restore_bond_colors(active_level, active_k);
+      	active_k = move[6*active_k+5];
+      	t_active_k = active_k;
+      	if(player == 1) active_i = 19*active_level + active_k;
+      	set_bond_colors(active_level, active_k, player, 1);
+      	}
+      break;
+    case 77: // 'm' key — bid to become the red player; first bidder wins
+      // Bidding is allowed even after random red sites have been added —
+      // that's the whole point. Only blocked once actual moves have been made.
+      if (moves > 0) {
+        nf.innerHTML = "Cannot bid — the game has already started.";
+      } else if (socket) {
+        socket.emit('setup', { bid_red: my_seat });
+      } else {
+        nf.innerHTML = "Bidding only available in multiplayer mode.";
+      }
+      break;
+    case 79: // 'o' widen field of view angle (shrink game model on screen)
+      fov += .5;
+      break;
+    case 80: // 'p' narrow field of view angle (expand game model on screen)
+      fov -= .5;
+      break; 
+    case 65: // 'a' key: Toggle off and on axis aligned bonds of length 2
+      if (jstart == 0)
+          jstart = 3;
+      else
+          jstart = 0;
+      break;
+    case 83: // 's'key : Toggle of and on cube diagonal bonds of length sqrt(3)
+      if (jend == 7)
+      	jend = 3;
+      else
+      	jend = 7;
+      break;
+    case 68: // 'd'  increase sphere radius
+      r += .01;
+      // initVertexBuffers(gl);
+      break;
+    case 70: // 'f' decrease sphere radius
+      r -= .01;
+      // initVertexBuffers(gl);
+      break;
+    case 71: // 'g' increase cylinder radius
+      r_cyl += .001;
+      // initVertexBuffers(gl);
+      break;
+    case 72: // 'h' decrease cylinder radius
+      r_cyl -= .001;
+      // initVertexBuffers(gl);
+      break;
+    case 74: // 'j' reset rotation about cylinder axis to zero
+         currentAngle[0] = 0.;
+      break;
+    case 75: // 'k' reset rotation about vertical axis to zero
+         currentAngle[1] = 0.;
+      break;
+    case 76: // 'l' toggle display of white bonds
+       suppress_white_bonds = 1 - suppress_white_bonds;
+       break;
+    case 13: // enter key
+      if (winning_player > 0) {
+          mouse_down = 0; dragging = false;
+          if (socket) {
+            socket.emit('reset', { saved_first_player: saved_first_player });
+          } else {
+            for (i = 0; i < nsites; ++i)
+               sphere_colors[i] = 0;
+            for (i = 0; i < actual_n_cylinders; ++i)
+               cylinder_colors[i] = 0;
+            player = saved_first_player;
+            red_moves = redturns;
+            active_level = Math.floor(actual_levels/2);
+            active_k = 0;
+            t_active_level = Math.floor(actual_levels/2);
+            t_active_k = 0;
+            winning_player = 0;
+            }
+         }
+      else if (waiting_for_confirmation) {
+        switch (waiting_for_confirmation) {
+          case 1:
+            if (moves > 0) {
+              nf.innerHTML = "Cannot change the first player. The game has already started.";
+              waiting_for_confirmation = 0;
+              break;
+              }
+            var new_first = 3 - saved_first_player;
+            if (socket) {
+              socket.emit('setup', { first_player: new_first });
+            } else {
+              player = new_first;
+              saved_first_player = player;
+              if (player == 1) {
+                nf.innerHTML = "First player is red 2D player";
+                red_moves = redturns;
+                }
+              else {
+                nf.innerHTML = "First player is green 1D player";
+                red_moves = redturns;
+                }
+              if (global_debug) console.log("player", player, "red_moves", red_moves);
+              }
+            waiting_for_confirmation = 0;
+            break;
+          case 2:
+            undo();
+            waiting_for_confirmation = 0;
+            break;
+          case 3:
+            if (socket) {
+              socket.emit('reset', { saved_first_player: saved_first_player });
+            } else {
+              for (i = 0; i < nsites; ++i)
+                sphere_colors[i] = 0;
+              for (i = 0; i < actual_n_cylinders; ++i)
+                 cylinder_colors[i] = 0;
+              player = saved_first_player;
+              red_moves = redturns;
+              active_level = Math.floor(actual_levels/2);
+              active_k = 0;
+              t_active_level = Math.floor(actual_levels/2);
+              t_active_k = 0;
+              winning_player = 0;
+              }
+            waiting_for_confirmation = 0;
+            break;
+          }
+        }
+      else if (sphere_colors[19*active_level + active_k] == 0) {
+        do_new_move();
+        }
+      break;
+    case 9: // tab key: start game over before it is finished
+       ev.preventDefault(); // stop Chrome intercepting Tab to show tab list
+       nf.innerHTML = "to start game over type Enter; otherwise continue the game";
+       waiting_for_confirmation = 3;
+       alert("to start game over before it is finished type Enter; otherwise continue the game");
+      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+       refocusCanvas();
+       break;    
+    case 186: // ';' toggle display of outer layer of cylinder
+      show_outer_layer = 1 - show_outer_layer;
+      if (show_outer_layer) {
+        n_k = 19;
+        make_bond_sites();
+        }
+      else {
+        n_k = 7;
+        clip_bond_sites();
+        first_clip = 1;
+        }
+      break;
+	
+    case 90: // 'z' key move model closer / ctrl-Z undo
+      if(mouse_control_key && undo_calls == 0) {
+         // In multiplayer, only the player who made the last move may undo it.
+         if (socket && my_seat !== null && my_seat !== (3 - player)) {
+           alert("You can only undo your own moves.");
+           mouse_down = 0; dragging = false;
+      refocusCanvas();
+           }
+         else {
+           undo();
+           }
+         }
+      else
+         tz += .2;
+      break;
+    case 88: // 'x' key move model closer
+      tz -= .2;
+      break;    
+    case 67: // 'c' increment start_level
+      if (start_level < actual_levels-1 && start_level < end_level - 1) {
+        ++start_level;
+        nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";           
+        adjust_bond_sites(0);
+        }
+      break;
+    case 86: // 'v' decrement start_level
+      if (start_level > 0) {
+        --start_level;
+        nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers"; 
+        adjust_bond_sites(1);
+        }
+      break;
+    case 66: // 'b' increment  end_level
+      if (end_level < actual_levels) {
+        ++end_level;
+        nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";  
+        adjust_bond_sites(1);
+        }
+      break;
+    case 33: // page up: increment actual_levels, i. e., length of cylinder
+       // console.log("key press", ev.keyCode);
+          if (moves == 0) {
+             if (actual_levels < nlevels) {
+                var new_levels = actual_levels + 1;
+                if (socket) {
+                  socket.emit('setup', { actual_levels: new_levels });
+                } else {
+                  actual_levels = new_levels;
+                  end_level = actual_levels;
+                  actual_nsites = 19*actual_levels;
+                  actual_n_cylinders = 19*17*actual_levels;
+                  active_level = Math.floor(actual_levels/2);
+                  active_k = 0;
+                  t_active_level = Math.floor(actual_levels/2);
+                  t_active_k = 0;
+                  initSites();
+                  make_bond_sites();
+                  make_win_test_bond_sites();
+                  nf.innerHTML = "cylinder length is " + actual_levels;
+                  }
+                }
+            else
+                nf.innerHTML = "cylinder length is already at the minimum of 2";
+            }
+          else
+             nf.innerHTML = "game has already started so cylinder length cannot be changed";
+       break;
+    case 78: // 'n' decrement end_level
+      // console.log("end_level", end_level);
+      if (end_level > start_level + 1) {
+        --end_level;
+        nf.innerHTML = "showing layers "+(start_level + 1)+" to "+end_level+" out of "+actual_levels+" layers";         
+        adjust_bond_sites(0);
+        }
+      // console.log("new end_level", end_level);
+      break;
+    case 34: // page down: decrease actual_levels, i. e., length of cylinder 
+         if (global_debug) console.log("key press", ev.keyCode);
+         if (moves == 0) {
+           if (actual_levels > 2) {
+              var new_levels = actual_levels - 1;
+              if (socket) {
+                socket.emit('setup', { actual_levels: new_levels });
+              } else {
+                actual_levels = new_levels;
+                end_level = actual_levels;
+                actual_nsites = 19*actual_levels;
+                actual_n_cylinders = 19*17*actual_levels;
+                active_level = Math.floor(actual_levels/2);
+                active_k = 0;
+                t_active_level = Math.floor(actual_levels/2);
+                t_active_k = 0;
+                initSites();
+                make_bond_sites();
+                make_win_test_bond_sites();
+                nf.innerHTML = "cylinder length is " + actual_levels;
+                }
+              }
+           else
+              nf.innerHTML = "cylinder length is already at the minimum of 2";
+           }
+         else
+           nf.innerHTML = "game has already started so cylinder length cannot be changed";
+      break;
+    case 219: // '['
+      currentAngle[0] += .3;
+      break;
+    case 221: // ']'
+      currentAngle[0] -= .3;
+      break;
+    case 222: // '"'
+      bond_lines = 1 - bond_lines;
+      break; 
+    case 188: // ',' or '<'
+      currentAngle[1] -= .3;
+      break;
+    case 190: // '.' or '>'
+      currentAngle[1] += .3;
+      break; 
+    case 97: // numpad 1
+    case 49: // '1'
+      if (trianglefac > 0) {
+        trianglefac -= .0625;
+        initVertexBuffers(gl);
+        }
+      break;
+    case 98: // numpad 2
+    case 50: // '2'
+      if (trianglefac < 1) {
+        trianglefac += .0625;
+        initVertexBuffers(gl);
+        }
+      break;
+    case 99: // numpad 3
+    case 51: // '3'
+      if (socket) {
+        socket.emit('setup', { redturns: redturns + .0625 });
+      } else {
+        redturns += .0625;
+        red_moves = redturns;
+        nf.innerHTML = "Average red placements per turn is " + redturns.toFixed(4);
+        }
+      break;
+    case 100: // numpad 4
+    case 52: // '4'
+      if (redturns > 1) {
+        if (socket) {
+          socket.emit('setup', { redturns: redturns - .0625 });
+        } else {
+          redturns -= .0625;
+          red_moves = redturns;
+          nf.innerHTML = "Average red placements per turn is " + redturns.toFixed(4);
+          }
+        }
+      break;
+    case 101: // numpad 5
+    case 53: // '5' toggle require_space_from_both_players
+      require_space_from_both_players = 1 - require_space_from_both_players;
+      nf.innerHTML = require_space_from_both_players
+        ? "Both players must press space to add a random red position."
+        : "One player pressing space adds a random red position.";
+      break;
+    case 102: // numpad 6
+    case 54: // '6' (line width no longer supported in modern WebGL)
+      nf.innerHTML = "Line width adjustment is not supported in modern WebGL.";
+      break;
+    case 103: // numpad 7
+    case 55: // '7' increase opacity
+      if (opacity < 1) {
+       opacity += 0.125;
+       if (global_debug) console.log("opacity", opacity);
+       }
+      break;
+    case 104: // numpad 8
+    case 56: // '8' decrease opacity
+      if (opacity > .125) {   
+        opacity -= 0.125;
+        if (global_debug) console.log("opacity", opacity);
+        }
+      break;
+    case 105: // numpad 9
+    case 57: // '9' toggle between spheres and octahedra
+      draw_octahedron = 1 - draw_octahedron;
+      break;
+    case 96: // numpad 0
+    case 48: // '0' toggle showing only small neighborhood of cursor sphere
+      only_near_cursor = 1 - only_near_cursor;
+      first_clip = 1;
+      break;
+    case 109: // numpad -
+    case 189: // '-' or '_' toggle showing thin context around the small neighborhood
+      context = 1 - context;
+      break;
+    case 107: // numpad +
+    case 187: // '=' toggle showing active_layer with yellowed sites and bonds
+      yellow = 1 - yellow;
+      break;
+    case 220: // '\' or '|' toggle display of context bond lines
+      display_context_bonds = 1 - display_context_bonds;
+      break;
+    case 32: // space — add random red position (or confirm pending one)
+      if (moves > 0) {
+         nf.innerHTML = "Cannot add a random red position. The game has already started.";
+      } else if (socket && (require_space_from_both_players || pending_confirmation)) {
+         // pending_confirmation: this client received a pending_random from the other
+         // player and must confirm via space_pressed regardless of local setting
+         socket.emit('space_pressed', { seat: my_seat });
+      } else {
+         add_random_red_site();
+      }
+      break;
+    }
+}
+
+function initArrayBuffer(gl, attribute, data, num) {
+ // Create a buffer object
+ var buffer = gl.createBuffer();
+ if (!buffer) {
+   console.log('Failed to create the buffer object');
+   return false;
+ }
+ // Write date into the buffer object
+ gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+ gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+ // Assign the buffer object to the attribute variable
+ var a_attribute = gl.getAttribLocation(program_phong, attribute);
+ if (a_attribute < 0) {
+   console.log('Failed to get the storage location of ' + attribute);
+   return false;
+ }
+ gl.vertexAttribPointer(a_attribute, num, gl.FLOAT, false, 0, 0);
+ // Enable the assignment of the buffer object to the attribute variable
+ gl.enableVertexAttribArray(a_attribute);
+
+ return true;
+}
+
+function print_flat_matrix_4(m, name) {
+   let i, j;
+   if (global_debug) console.log(name);
+   for (i = 0; i < 4; ++i)
+      if (global_debug) console.log(m[i], m[i+4], m[i+8], m[i+12]);
+   }
+   
+Matrix4.prototype.my_multiplyArray3 = function(p) {
+  var e = this.elements;
+  result = [];
+
+  result[0] = p[0] * e[0] + p[1] * e[4] + p[2] * e[ 8] + e[12];
+  result[1] = p[0] * e[1] + p[1] * e[5] + p[2] * e[ 9] + e[13];
+  result[2] = p[0] * e[2] + p[1] * e[6] + p[2] * e[10] + e[14];
+
+  return result;
+};
+
+function make_bond_sites() {
+  var i, ii, j, k, l, m, ll, kk, index, len = [], dbbond = 0;
+   for (l = 0; l < actual_levels; ++l)
+     for (k = 0; k < n_k; ++k) {
+       i = 19*l + k;
+       for (j = 0; j < 7; ++j) {
+         m = 14*i + j;   
+  	 if ( ( (j == 2 || j == 3) && move[6*k] < 0 ||
+  	      (j == 1 || j == 4) && move[6*k+5] < 0 ||
+  	      j == 5 && move[6*k+4] < 0 ||
+  	      j == 0 && move[6*k+1] < 0 ||
+  	      l == 0 && (j == 2 || j == 4) && 
+  	         (k == 1 || k == 2 || k == 3 || k == 16 || k == 17 || k == 18) || 
+  	      l == 0 && j == 2 &&
+  	         (k == 0 || k == 7 || k == 12 || k == 9 || k == 8) ||
+  	      l == actual_levels-1 && j == 6 ||
+  	      l == actual_levels-1 && j == 0 && k != 17 && k != 2 && k != 1 && k != 3 ||
+  	      l == actual_levels-1 && j == 1 && k != 18 && k != 2 && k != 1 && k != 3 ||
+  	      l == actual_levels-1 && j == 3 && (k == 6 || k == 5 || k == 4 || k == 13) ||
+  	      l == actual_levels-1 && j == 5 && (k == 14 || k == 4 || k == 5 || k == 6)
+  	      ) )
+  	   bond_sites[m] = -1;
+  	 else {
+  	   index = move_index[j];
+  	   if (j == 6) { // go directly to next level along cylinder axis direction
+  	      kk = k;
+  	      ll = l + 1;
+  	      bond_sites[m] = 19*ll + kk;
+  	      }
+  	   else {
+  	      kk = move[6*k + index];
+  	      ll = l;
+  	      if (
+                j == 0 && k != 17 && k != 2 && k != 1 && k != 3 ||
+  	        j == 1 && k != 18 && k != 2 && k != 1 && k != 3 ||
+  	        j == 3 && (k == 6 || k == 5 || k == 4 || k == 13) ||
+  	        j == 5 && (k == 14 || k == 4 || k == 5 || k == 6) )
+  	          ++ll;
+  	      else if (
+  	        (j == 2 || j == 4) && 
+  	          (k == 1 || k == 2 || k == 3 || k == 16 || k == 17 || k == 18) || 
+  	        j == 2 &&
+  	          (k == 0 || k == 7 || k == 12 || k == 9 || k == 8) )
+  	             --ll;
+  	      if (kk < 0) {
+  	        bond_sites[m] = -1;
+           if (global_debug) console.log("unexpected kk < 0 for i =", i, "and j =", j);
+  	        }
+  	      else
+  	        bond_sites[m] = 19*ll + kk;
+  	      }  
+  	   }
+  	}
+      if(0) console.log(i,"  ", bond_sites[14*i], bond_sites[14*i+1], bond_sites[14*i+2],
+        bond_sites[14*i+3], bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6]);
+      }
+   // set other 14 endpoints
+ //
+   for (i = 0; i < actual_nsites; ++i) {
+     for (j = 0; j < 7; ++j) {
+        m = 14*i + j;
+        ii = bond_sites[m];
+        if (ii >= 0)
+          bond_sites[14*ii + j + 7] = i;
+        }
+      }
+// 
+   for (i = 0; i < actual_nsites; ++i) 
+     if(0) console.log(
+       i, "bond sites", 
+       bond_sites[14*i+0], bond_sites[14*i+1], bond_sites[14*i+2], bond_sites[14*i+3], 
+       bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
+       bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
+       bond_sites[14*i+12], bond_sites[14*i+13]); 
+   // Keep a full unclipped copy so context drawing works after clip_bond_sites()
+   full_bond_sites.set(bond_sites);
+
+   for (j = 0; j < 14; ++j) {
+      m = bond_sites[14*19 + j];
+      let dot1 = 0, dot2, dist;
+      len[j] = 0;
+      for (k = 0; k < 3; ++k) {
+        bond_vector[3*j + k] = sites[3*m + k] - sites[3*19 + k];
+        dot1 += bond_vector[3*j + k];
+        len[j] += bond_vector[3*j + k]*bond_vector[3*j + k];
+        }
+      dot2 = bond_vector[3*j] - bond_vector[3*j + 1];
+      if (global_debug && dbbond)
+        if (global_debug) console.log("j", j, "bond_vector", bond_vector[3*j], bond_vector[3*j+1],
+          bond_vector[3*j+2], "dot1", dot1, "dot2", dot2, "len", Math.sqrt(len[j]));
+      }
+   if (global_debug && dbbond)
+   for (i = 0; i < 7; ++i)
+     for (j = i+1; j < 7; ++j) {
+        dist = 0;
+        for (k = 0; k < 3; ++k)
+           dist += (bond_vector[3*i + k] - bond_vector[3*j+k]) *
+              (bond_vector[3*i + k] - bond_vector[3*j+k]);
+           if (global_debug) console.log("i", i, "j", j, "  ",Math.sqrt(len[i]), Math.sqrt(len[j]),
+            "    ", Math.sqrt(dist));
+        }
+   for (i = 0; i < actual_nsites; ++i) 
+      for (j = 0; j < 14; ++j) {
+        m = bond_sites[14*i + j];
+        if (m >= 0) {
+          k = Math.floor(m/19);
+          if (k < start_level || k >= end_level)
+             bond_sites[14*i + j] = -1;
+          }
+        }
+   set_bond_colors(active_level, active_k, player, 1);
+   }
+
+function make_win_test_bond_sites() {
+  var i, ii, j, k, l, m, ll, kk, index, len = [], dbbond = 0;
+   for (l = 0; l < actual_levels; ++l)
+     for (k = 0; k < n_k; ++k) {
+       i = 19*l + k;
+       for (j = 0; j < 7; ++j) {
+         m = 14*i + j;   
+  	 if ( ( (j == 2 || j == 3) && move[6*k] < 0 ||
+  	      (j == 1 || j == 4) && move[6*k+5] < 0 ||
+  	      j == 5 && move[6*k+4] < 0 ||
+  	      j == 0 && move[6*k+1] < 0 ||
+  	      l == 0 && (j == 2 || j == 4) && 
+  	         (k == 1 || k == 2 || k == 3 || k == 16 || k == 17 || k == 18) || 
+  	      l == 0 && j == 2 &&
+  	         (k == 0 || k == 7 || k == 12 || k == 9 || k == 8) ||
+  	      l == actual_levels-1 && j == 6 ||
+  	      l == actual_levels-1 && j == 0 && k != 17 && k != 2 && k != 1 && k != 3 ||
+  	      l == actual_levels-1 && j == 1 && k != 18 && k != 2 && k != 1 && k != 3 ||
+  	      l == actual_levels-1 && j == 3 && (k == 6 || k == 5 || k == 4 || k == 13) ||
+  	      l == actual_levels-1 && j == 5 && (k == 14 || k == 4 || k == 5 || k == 6)
+  	      ) )
+  	   win_test_bond_sites[m] = -1;
+  	 else {
+  	   index = move_index[j];
+  	   if (j == 6) { // go directly to next level along cylinder axis direction
+  	      kk = k;
+  	      ll = l + 1;
+  	      win_test_bond_sites[m] = 19*ll + kk;
+  	      }
+  	   else {
+  	      kk = move[6*k + index];
+  	      ll = l;
+  	      if (
+                j == 0 && k != 17 && k != 2 && k != 1 && k != 3 ||
+  	        j == 1 && k != 18 && k != 2 && k != 1 && k != 3 ||
+  	        j == 3 && (k == 6 || k == 5 || k == 4 || k == 13) ||
+  	        j == 5 && (k == 14 || k == 4 || k == 5 || k == 6) )
+  	          ++ll;
+  	      else if (
+  	        (j == 2 || j == 4) && 
+  	          (k == 1 || k == 2 || k == 3 || k == 16 || k == 17 || k == 18) || 
+  	        j == 2 &&
+  	          (k == 0 || k == 7 || k == 12 || k == 9 || k == 8) )
+  	             --ll;
+  	      if (kk < 0) {
+  	        win_test_bond_sites[m] = -1;
+           if (global_debug) console.log("unexpected kk < 0 for i =", i, "and j =", j);
+  	        }
+  	      else
+  	        win_test_bond_sites[m] = 19*ll + kk;
+  	      }  
+  	   }
+  	}
+      if(0) console.log(i,"  ", bond_sites[14*i], bond_sites[14*i+1], bond_sites[14*i+2],
+        bond_sites[14*i+3], bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6]);
+      }
+   // set other 14 endpoints
+ //
+   for (i = 0; i < actual_nsites; ++i) {
+     for (j = 0; j < 7; ++j) {
+        m = 14*i + j;
+        ii = win_test_bond_sites[m];
+        if (ii >= 0)
+          win_test_bond_sites[14*ii + j + 7] = i;
+        }
+      }
+   }
+   
+function clip_bond_sites() {
+  let i, j, k, l, kk, ll, m, n;
+  if(0) for (i = 0; i < actual_nsites; ++i) 
+     if (global_debug) console.log(
+       i, "bond sites", 
+       bond_sites[14*i+0], bond_sites[14*i+1], bond_sites[14*i+2], bond_sites[14*i+3], 
+       bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
+       bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
+       bond_sites[14*i+12], bond_sites[14*i+13]);   
+  for (l = 0; l < actual_levels; ++l) {
+     for (k = n_k; k < 19; ++k) {
+        i = 19*l + k;
+        for (m = 0; m < 14; ++m)
+           bond_sites[14*i + m] = -1;
+        }
+     for (k = 0; k < 7; ++k) {
+        i = 19*l + k;
+        for (m = 0; m < 14; ++m) {
+     	   n = bond_sites[14*i + m];
+     	   if (1 && l == 0 && k == 2)
+            if (global_debug) console.log("clip_bond_sites l", l, "k", k, "i", i,"14*i + m", 14*i + m, "n", n, bond_sites[14*i + m]);
+           if (n >= 0) {
+     	     kk = n - 19*Math.floor(n/19);
+           if (global_debug) console.log("l", l, "k", k, "i", i, "m", m, "n", n, "kk", kk);
+     	     if (kk > 6) {
+     	       bond_sites[14*i + m] = -1;
+             if (global_debug) console.log("reset l", l, "k", k, "i", i, "n", n, "kk", kk);
+     	       }
+     	     }
+     	   }
+        }
+      }
+  if(0) for (i = 0; i < actual_nsites; ++i) 
+     if (global_debug) console.log(
+       i, "bond sites", 
+       bond_sites[14*i+0], bond_sites[14*i+1], bond_sites[14*i+2], bond_sites[14*i+3], 
+       bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
+       bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
+       bond_sites[14*i+12], bond_sites[14*i+13]); 
+   for (i = 0; i < actual_nsites; ++i) 
+      for (j = 0; j < 14; ++j) {
+        m = bond_sites[14*i + j];
+        if (m >= 0) {
+          k = Math.floor(m/19);
+          if (k < start_level || k >= end_level)
+             bond_sites[14*i + j] = -1;
+          }
+        }
+  }
+   
+function set_bond_colors(l, k, player, temporary) {
+   var ii, i, j, m, mm, n, dbg = 0;
+   ii = 19*l + k;
+   /*
+   for (i = 0; i < actual_nsites; ++i) {
+     for (j = 0; j < 7; ++j) {
+        m = 7*i + j;
+        mm = 14*i + j;
+        if (bond_sites[mm] == ii) {
+           if (temporary) {
+              n = j+7;
+              saved_cylinder_colors[n] = cylinder_colors[m];
+              saved_active_bond_m[n] = m;
+              if (global_debug && dbg)
+                if (global_debug) console.log("1 saved n", n, "m", m, "color", cylinder_colors[m]); 
+              }
+            if (sphere_colors[i] == player) {
+            	cylinder_colors[m] = player;
+              if (global_debug && dbg)
+                if (global_debug) console.log("1 cylinder colors[", m, "] = ", player);
+              }
+            }
+         }
+       }
+    */
+    for (j = 0; j < 7; ++j) {
+      m = 7*ii + j;
+      mm = 14*ii + j;
+      if (bond_sites[mm] >= 0) {
+       if (temporary) {
+       	 saved_cylinder_colors[j] = cylinder_colors[m];
+         saved_active_bond_m[j] = m;
+         if (global_debug && dbg)
+                if (global_debug) console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
+                  "bond end", bond_sites[mm]);
+         }
+       if (sphere_colors[bond_sites[mm]] == player) {
+          cylinder_colors[m] = player;
+          if (global_debug && dbg)
+              if (global_debug) console.log("1 cylinder colors[", m, "] = ", player, "j", j,
+                "bond end", bond_sites[mm]);
+          }
+       }
+      else if(temporary)
+        saved_active_bond_m[j] = -1;
+
+     m = m+7;
+     mm = mm+7;
+     if (bond_sites[mm] >= 0) {
+       if (temporary) {
+       	 saved_cylinder_colors[j] = cylinder_colors[m];
+         saved_active_bond_m[j] = m;
+         if (global_debug && dbg)
+                if (global_debug) console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
+         }
+       if (sphere_colors[bond_sites[mm]] == player) {
+          cylinder_colors[7*bond_sites[mm]+j] = player;
+          if (global_debug && dbg)
+              if (global_debug) console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
+                "bond end", bond_sites[mm]);
+          }
+       }
+      else if(temporary)
+        saved_active_bond_m[j] = -1;
+    }
+  } 
+   
+function restore_bond_colors(l, k) {
+   var i, j, m, db_restore = 0;
+   i = 19*l + k;
+   if (global_debug && db_restore)
+      if (global_debug) console.log("restore_bond_colors", "l", l, "k", k);
+   else
+     for (j = 0; j < 7; ++j) {
+      cylinder_colors[7*i + j] = 0;
+      m = bond_sites[14*i+j+7];
+      if (m >= 0) 
+         cylinder_colors[7*m+j] = 0;
+     }
+   }
+    	      
+var g_MvpMatrix = new Matrix4(); // Model view matrix, for determining viewing direction
+var normalMatrix = new Matrix4(); // Transformation matrix for normals
+var unrotated_normalMatrix = new Matrix4();
+var g_modelMatrix = new Matrix4(), g_mvpMatrix = new Matrix4();
+var t_modelMatrix = new Matrix4();
+var v_modelMatrix = new Matrix4();
+var t_normalMatrix = new Matrix4();
+var s_normalMatrix = new Matrix4();
+
+function drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
+  var i, j, k, l, m, n, rscale, octo, c_add;
+  vpos = new Vector3([1., 1., 1.]);
+  normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
+  normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
+  if (do_tilt_z) 
+     normalMatrix.rotate( -Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.); 
+  if (do_tilt_y)
+     normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  gl.uniformMatrix4fv(u_NormalMatrix, false, normalMatrix.elements);
+  gl.uniform1i(u_compute_color, 1);
+  // result = normalMatrix.multiplyVector3(vpos).elements;
+  // console.log("result", result[0], result[1], result[2]);
+  
+  // When context is on, determine the full level and k ranges to iterate:
+  // normal range + the clipped-away regions (shown as small truncated octahedra).
+  var j_min = context ? 0            : start_level;
+  var j_max = context ? actual_levels : end_level;
+  var k_max_full = context ? 19 : n_k; // when context on, also show outer k>n_k as octos
+
+  for (j = j_min; j < j_max; ++j) {
+    // Is this level in the hidden-by-level-clip region?
+    var level_hidden = (j < start_level || j >= end_level);
+    if (level_hidden && !context) continue; // skip if context off
+
+    if (j == t_active_level && yellow)
+      c_add = 4;
+    else
+      c_add = 0;
+    for (k = 0; k < k_max_full; ++k) {
+      rscale = r;
+      octo = 0;
+      // k hidden by ';' (outer layer clipped)?
+      var k_hidden = (k >= n_k);
+      // hidden by only_near_cursor?
+      var near_hidden = (only_near_cursor && !(near[t_active_k].includes(k) &&
+          Math.abs(j - t_active_level) <= near_level));
+
+      if (level_hidden || k_hidden || near_hidden) {
+        if (!context)
+          continue;
+        else {
+          rscale = rsmall;
+          octo = 1;
+          }
+        }
+      i = 19*j + k;
+      if (kind == 0) {
+         gl.uniform1i(u_compute_color, 0);
+         gl.uniform4f(u_Color, 0., (2*j+1)/255., (2*k+1)/255., 1);
+         }
+      else if (j == t_active_level && k == t_active_k) { 
+         if (sphere_colors[i] == 0) 
+            gl.uniform4fv(u_Color, colors[3 + c_add]);
+         else 
+            gl.uniform4fv(u_Color, colors[sphere_colors[i] + 8]);
+         }
+      else if (c_add || sphere_colors[i])
+  	 gl.uniform4fv(u_Color, colors[sphere_colors[i] + c_add]);
+      else if (j == 0 || j == actual_levels - 1) {
+         if (k < 7) 
+            gl.uniform4fv(u_Color, colors[14]);
+         else
+            gl.uniform4fv(u_Color, colors[15]);
+         }
+      else {
+         if (k < 7) 
+            gl.uniform4fv(u_Color, colors[0]);
+         else
+            gl.uniform4fv(u_Color, colors[13]);
+         }
+      t_modelMatrix.setTranslate(tx, ty, tz);
+      t_modelMatrix.multiply(normalMatrix);
+      t_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
+      t_modelMatrix.scale(rscale, rscale, rscale);
+      gl.uniformMatrix4fv(u_ModelMatrix, false, t_modelMatrix.elements);
+      g_MvpMatrix.set(viewProjMatrix);
+      g_MvpMatrix.multiply(t_modelMatrix);
+      gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
+      if (debug_matrix > 1 && k == 0 && frame == 1)
+     // print_flat_matrix_4(g_MvpMatrix.elements, "sphere g_MvpMatrix");
+  	print_flat_matrix_4(t_modelMatrix.elements, "sphere t_modelMatrix");
+      if(draw_octahedron || octo)	  	   
+   	gl.drawElements(gl.TRIANGLES, 3*44, gl.UNSIGNED_SHORT, 0);
+      else
+   	gl.drawElements(gl.TRIANGLES, 3*sphere_triangles, gl.UNSIGNED_SHORT, 3*44*2);
+      }
+    }  
+  }
+
+function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, context_pass) {
+  var i, m, n, kk, dbg = 1, first = 7;
+  
+  normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
+  normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
+  if (do_tilt_z) 
+     normalMatrix.rotate( -Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.);
+  if (do_tilt_y)   
+     normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  v_modelMatrix.setTranslate(tx, ty, tz);
+  v_modelMatrix.multiply(normalMatrix);
+  gl.uniformMatrix4fv(u_ModelMatrix, false, v_modelMatrix.elements);
+  g_MvpMatrix.set(viewProjMatrix);
+  g_MvpMatrix.multiply(v_modelMatrix);
+  gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
+  if (context_pass)
+    gl.lineWidth(1);
+  else
+    gl.lineWidth(line_width);
+  // When context is on, extend loops to cover all hidden regions so we can
+  // draw context lines for bonds touching hidden spheres.
+  var bl_l_min = context ? 0             : start_level;
+  var bl_l_max = context ? actual_levels  : end_level;
+  var bl_k_max = context ? 19            : n_k;
+
+  for (j = jstart; j < jend; j += 1) {
+   for (var l = bl_l_min; l < bl_l_max; ++l) {
+     for (var k = 0; k < bl_k_max; ++k)
+       {
+       i = 19*l + k;
+       mm = 14*i + j;
+       // Normal pass uses clipped bond_sites; context pass uses full_bond_sites
+       // so it can find bonds whose endpoints were clipped away.
+       n = context_pass ? full_bond_sites[mm] : bond_sites[mm];
+       if (n >= 0) {
+         nl = Math.floor(n/19);
+         nk = n - 19*nl;
+         m = 7*i + j;
+         kk = listart + 2*m;
+         if (cylinder_colors[m] == 0 && suppress_white_bonds)
+            continue;
+         // Is the source endpoint (l,k) visible in the main drawing pass?
+         var src_visible = (l >= start_level && l < end_level && k < n_k &&
+              (!only_near_cursor || (near[t_active_k].includes(k) &&
+               Math.abs(l - t_active_level) <= near_level)));
+         // Is the dest endpoint (nl,nk) visible in the main drawing pass?
+         var dst_visible = (nl >= start_level && nl < end_level && nk < n_k &&
+              (!only_near_cursor || (near[t_active_k].includes(nk) &&
+               Math.abs(nl - t_active_level) <= near_level)));
+         // Context pass: draw if at least one endpoint is hidden (including
+         // the case where BOTH are hidden — both missing from clipped bond_sites
+         // but present in full_bond_sites).
+         // Normal pass: draw only when both endpoints are visible.
+         var draw_as_context = context_pass && context && !(src_visible && dst_visible);
+         var draw_as_normal  = !context_pass && src_visible && dst_visible;
+         if (!draw_as_context && !draw_as_normal)
+            continue;
+         if (l == t_active_level && nl == t_active_level && yellow)
+            c_add = 4;
+         else
+            c_add = 0;
+         gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
+   	     gl.drawElements(gl.LINES, 2, gl.UNSIGNED_SHORT, 2*kk);
+   	 if (global_debug && dbg && first && frame == 1) {
+   	   --first;
+       if (global_debug) console.log("bond_lines j", j, "i", i, "k", k, "mm", mm, "m", m, "n", n, "kk", kk);
+   	   }
+   	 }
+        }
+      }
+     }
+   first_clip = 0;
+   }
+   
+function draw_forward_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, context_pass) {
+  var i, m, n, kk;
+  normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
+  normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
+  if (do_tilt_z) 
+     normalMatrix.rotate( -Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.);
+  if (do_tilt_y)   
+     normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  v_modelMatrix.setTranslate(tx, ty, tz);
+  v_modelMatrix.multiply(normalMatrix);
+  gl.uniformMatrix4fv(u_ModelMatrix, false, v_modelMatrix.elements);
+  g_MvpMatrix.set(viewProjMatrix);
+  g_MvpMatrix.multiply(v_modelMatrix);
+  gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
+  gl.uniform4f(u_Color, 1, 0, 1, 1);
+  gl.drawElements(gl.LINES, 2*7, gl.UNSIGNED_SHORT, 2*fistart);
+  }
+   
+function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix) {
+  var i, m, n, kk, c_add;
+  if (global_debug && db_cylinder_calls)
+   if (global_debug) console.log("drawcylinders");
+  normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
+  normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
+  if (do_tilt_z) 
+     normalMatrix.rotate( -Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.);
+  if (do_tilt_y)   
+     normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  unrotated_normalMatrix.setRotate(
+  	-Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.);
+  unrotated_normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  gl.uniform4f(u_Color, 1.0, 0.9, 0.8, 1.0);
+  // gl.uniformMatrix4fv(u_NormalMatrix, false, normalMatrix.elements);
+  gl.uniform4f(u_Color, 0.3, 1.0, 0.9, 1.0);
+  for (j = jstart; j < jend; j += 1) { // calculate the rotation and scale;
+    s_normalMatrix.setRotate(zrot[j], 0., 0., 1.);
+    let ry = yrot[j];
+    if (ry != 0.) 
+      s_normalMatrix.rotate(ry, 0., 1., 0.);
+    s_normalMatrix.rotate(xrot[j], 1., 0., 0.);
+    t_normalMatrix.set(normalMatrix);
+    t_normalMatrix.multiply(s_normalMatrix);
+    gl.uniformMatrix4fv(u_NormalMatrix, false, t_normalMatrix.elements);
+    // gl.uniform4f(u_Color, 0.2*j, .3+.1*j, -.4 +.2*j, 1.);
+    // for (i = 0; i < actual_nsites)
+    for (var l = start_level; l < end_level; ++l) {
+
+     if (!only_near_cursor || Math.abs(l - t_active_level) <= near_level) { 
+      for (var k = 0; k < n_k; ++k)
+       {
+       i = 19*l + k;
+       mm = 14*i + j;
+       n = bond_sites[mm];
+       if (n >= 0) {
+         m = 7*i + j;
+         if (cylinder_colors[m] == 0 && suppress_white_bonds)
+            continue;
+         nl = Math.floor(n/19);
+         nk = n - 19*nl;
+         if (only_near_cursor && !(near[t_active_k].includes(k) && near[t_active_k].includes(nk) 
+              && Math.abs(nl - t_active_level) <= near_level) )
+            continue;
+         if (l == t_active_level && nl == t_active_level && yellow)
+            c_add = 4;
+         else
+            c_add = 0;
+         gl.uniform4fv(u_Color, colors[cylinder_colors[m] + c_add]);
+         if (0 && cylinder_colors[m] > 0 && do_drawing_cylinder_output)
+           if (global_debug) console.log("drawing cylinder", m, "i", i, "j", j, "bondsite", n, "color", cylinder_colors[m]);
+         v_modelMatrix.setTranslate(tx, ty, tz);
+         v_modelMatrix.multiply(normalMatrix);
+  	 v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
+  	 v_modelMatrix.multiply(s_normalMatrix);
+  	 v_modelMatrix.scale(r_cyl, yscale[j], r_cyl); 
+  	 gl.uniformMatrix4fv(u_ModelMatrix, false, v_modelMatrix.elements);
+  	 g_MvpMatrix.set(viewProjMatrix);
+  	 g_MvpMatrix.multiply(v_modelMatrix);
+  	 v_modelMatrix.set(unrotated_normalMatrix);
+  	 v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
+  	 v_modelMatrix.multiply(s_normalMatrix);
+  	 v_modelMatrix.scale(1, yscale[j], 1); 
+
+  	 gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
+  	 if (debug_matrix > 1 && j == 6 && l == 1 && k == 0 && frame == 1) {
+  	     v_modelMatrix.scale(1, 1./yscale[j], 1);
+  	     // print_flat_matrix_4(g_MvpMatrix.elements, "cylinder g_MvpMatrix");
+  	     print_flat_matrix_4(v_modelMatrix.elements, "cylinder v_modelMatrix");
+  	     }
+   	 gl.drawElements(gl.TRIANGLES, (ncyl_phi-1)*6, gl.UNSIGNED_SHORT,
+   	     (44 + sphere_triangles) * 6);
+   	 }
+   	}
+       }
+      }
+     }
+   first_clip = 0;
+   }
+      
+function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, context_pass) {
+  var i, k, l, m, n, ii, mm, nn, sm, sn, c_add, dbg = 0;
+  
+  normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
+  normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
+  if (do_tilt_z) 
+     normalMatrix.rotate( -Math.atan2(1., Math.sqrt(2.))*180./Math.PI, 0., 0., 1.);
+  if (do_tilt_y)
+     normalMatrix.rotate( 45., 0.0, 1.0, 0.0); // Rotation around y-axis
+  gl.uniformMatrix4fv(u_NormalMatrix, false, normalMatrix.elements);
+  for (l = start_level; l < end_level; ++l) {
+      for (k = 0; k < n_k; ++k)  
+        {
+        i = 19*l + k;
+        v_modelMatrix.setTranslate(tx, ty, tz);
+        v_modelMatrix.multiply(normalMatrix);
+  	v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
+  	gl.uniformMatrix4fv(u_ModelMatrix, false, v_modelMatrix.elements);
+  	g_MvpMatrix.set(viewProjMatrix);
+  	g_MvpMatrix.multiply(v_modelMatrix);
+  	if (true)
+  	   {
+  	   gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
+  	   if (debug_matrix > 1 && l == 1 && k == 0 && frame == 1) {
+  	      let vv_modelMatrix = new Matrix4;
+  	      vv_modelMatrix.setTranslate(sites[3*i], sites[3*i+1], sites[3*i+2]);
+  	      print_flat_matrix_4(normalMatrix.elements, "triangle normalMatrix");
+  	      print_flat_matrix_4(v_modelMatrix.elements, "triangle v_modelMatrix");
+  	      }    
+  	   // print_flat_matrix_4(g_MvpMatrix.elements, "triangle g_MvpMatrix");
+   	   // gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 2*tistart); // 2 bytes per index
+   	   // gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0); // 2 bytes per index
+   	   if (0 && frame == 1)
+   	      for (ii = 0; ii < 7; ++ii) {
+   	         m = bond_sites[14*i + ii];
+             if (global_debug) console.log("site", sites[3*m], sites[3*m+1], sites[3*m+2], 
+   	            "vector", sites[3*i] + bond_vector[3*ii], 
+   	            sites[3*i+1] + bond_vector[3*ii+1], sites[3*i+2] + bond_vector[3*ii+2]);
+   	         }
+   	   for (ii = 0; ii < 12; ++ii) {
+   	      m = triangles[ii][0];
+   	      n = triangles[ii][1];
+   	      mm = bond_sites[14*i + m];
+   	      nn = bond_sites[14*i + n];
+
+   	      if (mm >= 0 && nn >= 0) {
+   	        if( (sphere_colors[i]  == 1 ||  (player == 1 &&  i == active_i) ) &&
+   	            (sphere_colors[mm] == 1 ||  (player == 1 && mm == active_i) ) &&
+   	            (sphere_colors[nn] == 1 ||  (player == 1 && nn == active_i) ) ) {
+   	          ml = Math.floor(mm/19);
+   	          mk = mm - 19*ml;
+   	          nl = Math.floor(nn/19);
+   	          nk = nn - 19*nl;
+   	          if (only_near_cursor) {
+   	            if ( !( near[t_active_k].includes(k) && near[t_active_k].includes(mk)
+   	              && near[t_active_k].includes(nk)
+                      && Math.abs(l  - t_active_level) <= near_level 
+                      && Math.abs(ml  - t_active_level) <= near_level
+                      && Math.abs(nl  - t_active_level) <= near_level
+                       !== context_pass) )
+                       continue;
+                    }
+                  if (l == t_active_level && ml == t_active_level && nl == t_active_level && yellow)
+                     c_add = 4;
+                  else
+                     c_add = 0;
+                  gl.uniform4f(u_Color, colors[1 + c_add][0], colors[1 + c_add][1],
+                             colors[1 + c_add][2], opacity);
+   	          gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, 2*tistart + 6*ii);
+   	          if (global_debug && dbg)
+                 if (global_debug) console.log("first_add", first_add);
+   	          if (global_debug && dbg && first_add) {
+                 if (global_debug) console.log("drew triangle", ii);
+                 if (global_debug) console.log("vertices", i, mm, nn);
+   	             let kk = 3*(tvstart + 3*ii);
+                 if (global_debug) console.log("normal", normals[kk], normals[kk+1], normals[kk+2]);
+   	             let vp = [vpx, vpy, vpz];
+                     let v_P = [], vvp = [], vvn, vdot = [], a = [], b = [], c = [], d = [];
+                     v_P[0] = new Vector4([sites[3*i],   sites[3*i  + 1], sites[3*i  + 2], 1.]);
+                     v_P[1] = new Vector4([sites[3*mm],  sites[3*mm + 1], sites[3*mm + 2], 1.]);         
+                     v_P[2] = new Vector4([sites[3*nn],  sites[3*nn + 1], sites[3*nn + 2], 1.]);
+                     let v_N = new Vector3([normals[kk], normals[kk + 1], normals[kk + 2]]);
+                     vvn = t_normalMatrix.multiplyVector3(v_N);
+                     for (let p = 0; p < 3; ++p) {
+                        vdot[p] = 0.;
+                        vvp[p] = v_modelMatrix.multiplyVector4(v_P[p]);
+                        for (let l = 0; l < 3; ++l)
+                           vdot[p] += v_N.elements[l]*(vp[l] - vvp[p].elements[l]);
+                        }
+                     if (global_debug) console.log("vdot", vdot[0], vdot[1], vdot[2]);
+                     for (l = 0; l < 3; ++l) {
+                        a[l] = v_P[1].elements[l] - v_P[0].elements[l];
+                        b[l] = v_P[2].elements[l] - v_P[0].elements[l];
+                        c[l] = vvp[1].elements[l] - vvp[0].elements[l];
+                        d[l] = vvp[2].elements[l] - vvp[0].elements[l];                        
+                        } 
+                     let cr = cross(a, b);
+                     if (global_debug) console.log("cr", cr[0], cr[1], cr[2]);
+                     let crr = cross(c, d);
+                     if (global_debug) console.log("c", c[0], c[1], c[2]);
+                     if (global_debug) console.log("d", d[0], d[1], d[2]);
+                     if (global_debug) console.log("crr", crr[0], crr[1], crr[2]);
+                     if (global_debug) console.log("vvn", vvn.elements[0], vvn.elements[1], vvn.elements[2]);
+                     }
+                   }
+   	      // else 
+   	      if (0 && frame == 1)
+            if (global_debug) console.log("negative site: l", l, "k", k, "i", i, "ii", ii, 
+   	          "m", m, "mm", mm, "n", n, "nn", nn);
+   	      }
+   	   } 
+   	}
+      }
+    }
+  if (global_debug && dbg && first_add)
+    if (global_debug) console.log("l", l, "k", k, "i", i, "ii", ii);
+  }
+
+function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
+  var forward_lines = 0;
+  // Clear color and depth buffer
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (debug_matrix > 0 && frame == 1)
+  	print_flat_matrix_4(viewProjMatrix.elements, " draw viewProjMatrix");
+  ++frame;
+
+  gl.uniform1i(u_compute_color, 1);
+  gl.depthMask(true);
+  gl.enable(gl.CULL_FACE);
+  gl.uniform1i(u_two_sided_normal, 0);
+  drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind);
+  if (forward_lines) {
+    gl.lineWidth(line_width);
+    gl.uniform1i(u_compute_color, 0);
+    draw_forward_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
+    gl.uniform1i(u_compute_color, 1);
+    }
+  else if (bond_lines) {
+    gl.lineWidth(line_width);
+    gl.uniform1i(u_compute_color, 0);
+    draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
+    gl.uniform1i(u_compute_color, 1);
+    }
+  else
+    drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix);
+  // Context bond lines: drawn whenever context is on and any region is hidden
+  // (only_near_cursor, level clip, or outer-layer clip via ';').
+  // draw_bond_lines already skips bonds between two visible spheres (they are
+  // drawn as cylinders above); it only draws bonds touching hidden spheres.
+  if (context && display_context_bonds &&
+      (only_near_cursor || start_level > 0 || end_level < actual_levels || n_k < 19)) {
+      gl.uniform1i(u_compute_color, 0);
+      draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
+      gl.uniform1i(u_compute_color, 1);
+      }
+  gl.disable(gl.CULL_FACE);
+  gl.disable(gl.BLEND);
+  gl.uniform1i(u_two_sided_normal, 1);
+  if (opacity < 1) {
+     gl.uniform1i(u_compute_color, 0);
+     gl.enable(gl.BLEND);
+     gl.depthMask(false);
+     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+     } 
+  drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
+  gl.uniform1i(u_two_sided_normal, 0);
+  do_drawing_cylinder_output = 0;
+  if (first_add > 0) 
+    --first_add;
+}
+
+window.addEventListener('resize', function() {
+  if (!canvas || !gl) return;
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight - text_line_height;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  // Recompute mvpMatrix so the next picking draw call uses the right projection.
+  // mvpMatrix is the outer variable that onmousedown closes over.
+  if (typeof mvpMatrix !== 'undefined' && typeof fov !== 'undefined') {
+    mvpMatrix = new Matrix4();
+    mvpMatrix.setPerspective(fov, canvas.width / canvas.height, 1, 100);
+    mvpMatrix.lookAt(vpx, vpy, vpz, lookx, looky, lookz, 0, 1, 0);
+    gl.uniformMatrix4fv(u_MvpMatrix, false, mvpMatrix.elements);
+  }
+});
+    </script>
+  </body>
+</html>
