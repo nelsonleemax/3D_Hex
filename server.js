@@ -59,6 +59,7 @@ function makeDefaultState() {
     undo_calls         : 0,
     red_bidder         : null,   // seat of player who bid for red, null if not yet bid
     pending_random     : null,   // { seat, level, k } when one player pressed space awaiting confirmation
+    require_space      : 0,       // when 1, both players must press space to add a random site
   };
 }
 
@@ -232,6 +233,9 @@ io.on('connection', (socket) => {
     if (changes.first_player !== undefined) {
       state.player             = changes.first_player;
       state.saved_first_player = changes.first_player;
+    }
+    if (changes.require_space !== undefined) {
+      state.require_space = changes.require_space;
     }
     // bid_red: first player to press 'm' becomes red (player 1 / seat 1).
     // Only accepted before any moves or random sites have been placed.

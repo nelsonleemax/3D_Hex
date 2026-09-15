@@ -137,6 +137,9 @@ function applyServerState(s) {
   red_moves_incremented = s.red_moves_incremented;
   moves              = s.moves;
   random_sites       = s.random_sites;
+  if (s.require_space !== undefined) {
+    require_space_from_both_players = s.require_space;
+  }
   winning_player     = s.winning_player;
   move_active_level  = s.move_active_level;
   move_active_k      = s.move_active_k;
@@ -223,10 +226,13 @@ function applyServerState(s) {
 
   // Update the status text (if no win)
   if (winning_player === 0) {
-    if (player === 2) {
-      nf.innerHTML = 'Green turn';
-    } else {
-      nf.innerHTML = 'Remaining red turns: ' + Math.ceil(red_moves).toFixed(0);
+    // Don't overwrite "N random red positions have been added" message
+    if (random_sites === prev_random_sites) {
+      if (player === 2) {
+        nf.innerHTML = 'Green turn';
+      } else {
+        nf.innerHTML = 'Remaining red turns: ' + Math.ceil(red_moves).toFixed(0);
+      }
     }
     // Notify the player whose turn it just became — but only when:
     //   (a) the active player actually changed (red→green or green→red), AND
@@ -420,7 +426,8 @@ var n_cylinders = 7*19*nlevels, actual_n_cylinders = n_cylinders;
 var nsites = 19*nlevels, actual_nsites = nsites;
 let only_near_cursor = 0, display_context_bonds = 1;
 let near_level = 1;
-var context = 0;
+var context_octahedra = 0; // show hidden sites as small truncated octahedra
+// display_context_bonds (already declared) controls context bond lines independently
 var yellow = 0;
 var sphere_vertices = ntheta*nphi;
 var sphere_triangles = 2*(ntheta-1)*(nphi-1); 
@@ -1858,11 +1865,15 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
         }
       break;
     case 101: // numpad 5
-    case 53: // '5' toggle require_space_from_both_players
-      require_space_from_both_players = 1 - require_space_from_both_players;
-      nf.innerHTML = require_space_from_both_players
-        ? "Both players must press space to add a random red position."
-        : "One player pressing space adds a random red position.";
+    case 53: // '5' toggle require_space_from_both_players (shared via server)
+      if (socket) {
+        socket.emit('setup', { require_space: 1 - require_space_from_both_players });
+      } else {
+        require_space_from_both_players = 1 - require_space_from_both_players;
+        nf.innerHTML = require_space_from_both_players
+          ? "Both players must press space to add a random red position."
+          : "One player pressing space adds a random red position.";
+      }
       break;
     case 102: // numpad 6
     case 54: // '6' (line width no longer supported in modern WebGL)
@@ -1892,8 +1903,11 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       first_clip = 1;
       break;
     case 109: // numpad -
-    case 189: // '-' or '_' toggle showing thin context around the small neighborhood
-      context = 1 - context;
+    case 189: // '-' or '_' toggle context_octahedra truncated octahedra for hidden sites
+      context_octahedra = 1 - context_octahedra;
+      nf.innerHTML = context_octahedra
+        ? "Context octahedra on (use '\\ ' to toggle context bond lines)"
+        : "Context octahedra off";
       break;
     case 107: // numpad +
     case 187: // '=' toggle showing active_layer with yellowed sites and bonds
@@ -2292,16 +2306,16 @@ function drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMat
   // result = normalMatrix.multiplyVector3(vpos).elements;
   // console.log("result", result[0], result[1], result[2]);
   
-  // When context is on, determine the full level and k ranges to iterate:
+  // When context_octahedra is on, determine the full level and k ranges to iterate:
   // normal range + the clipped-away regions (shown as small truncated octahedra).
-  var j_min = context ? 0            : start_level;
-  var j_max = context ? actual_levels : end_level;
-  var k_max_full = context ? 19 : n_k; // when context on, also show outer k>n_k as octos
+  var j_min = context_octahedra ? 0            : start_level;
+  var j_max = context_octahedra ? actual_levels : end_level;
+  var k_max_full = context_octahedra ? 19 : n_k; // when context_octahedra on, also show outer k>n_k as octos
 
   for (j = j_min; j < j_max; ++j) {
     // Is this level in the hidden-by-level-clip region?
     var level_hidden = (j < start_level || j >= end_level);
-    if (level_hidden && !context) continue; // skip if context off
+    if (level_hidden && !context_octahedra) continue; // skip if context_octahedra off
 
     if (j == t_active_level && yellow)
       c_add = 4;
@@ -2317,7 +2331,7 @@ function drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMat
           Math.abs(j - t_active_level) <= near_level));
 
       if (level_hidden || k_hidden || near_hidden) {
-        if (!context)
+        if (!context_octahedra)
           continue;
         else {
           rscale = rsmall;
@@ -2387,11 +2401,11 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
     gl.lineWidth(1);
   else
     gl.lineWidth(line_width);
-  // When context is on, extend loops to cover all hidden regions so we can
+  // When context_octahedra is on, extend loops to cover all hidden regions so we can
   // draw context lines for bonds touching hidden spheres.
-  var bl_l_min = context ? 0             : start_level;
-  var bl_l_max = context ? actual_levels  : end_level;
-  var bl_k_max = context ? 19            : n_k;
+  var bl_l_min = context_octahedra ? 0             : start_level;
+  var bl_l_max = context_octahedra ? actual_levels  : end_level;
+  var bl_k_max = context_octahedra ? 19            : n_k;
 
   for (j = jstart; j < jend; j += 1) {
    for (var l = bl_l_min; l < bl_l_max; ++l) {
@@ -2421,7 +2435,7 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
          // the case where BOTH are hidden — both missing from clipped bond_sites
          // but present in full_bond_sites).
          // Normal pass: draw only when both endpoints are visible.
-         var draw_as_context = context_pass && context && !(src_visible && dst_visible);
+         var draw_as_context = context_pass && !(src_visible && dst_visible);
          var draw_as_normal  = !context_pass && src_visible && dst_visible;
          if (!draw_as_context && !draw_as_normal)
             continue;
@@ -2685,11 +2699,11 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
     }
   else
     drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix);
-  // Context bond lines: drawn whenever context is on and any region is hidden
+  // Context bond lines: drawn whenever context_octahedra or display_context_bonds is on and any region is hidden
   // (only_near_cursor, level clip, or outer-layer clip via ';').
   // draw_bond_lines already skips bonds between two visible spheres (they are
   // drawn as cylinders above); it only draws bonds touching hidden spheres.
-  if (context && display_context_bonds &&
+  if (display_context_bonds &&
       (only_near_cursor || start_level > 0 || end_level < actual_levels || n_k < 19)) {
       gl.uniform1i(u_compute_color, 0);
       draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
