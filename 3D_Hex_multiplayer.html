@@ -278,6 +278,38 @@ function chatKeydown(ev) {
   ev.stopPropagation(); // prevent ALL keys in chat input reaching the game
 }
 
+// ── Confirmation notification helper ─────────────────────────────────────────
+// Like notifyTurn but for space-bar confirmation requests. Shows a flash banner
+// for 8 seconds and a system notification so it works even in background windows.
+function notifyConfirm(msg) {
+  nf.innerHTML = msg;
+  var banner = document.createElement('div');
+  banner.textContent = msg;
+  banner.style.cssText = 'position:fixed;top:8%;left:50%;transform:translateX(-50%);' +
+    'background:#ff8c00;color:#000;font-size:21px;font-family:monospace;font-weight:bold;' +
+    'padding:14px 36px;border:4px solid #c00;border-radius:12px;z-index:99999;' +
+    'text-align:center;box-shadow:0 0 30px rgba(0,0,0,0.5);';
+  document.body.appendChild(banner);
+  var bannerTimer = setTimeout(function() {
+    if (banner.parentNode) banner.parentNode.removeChild(banner);
+  }, 8000);
+  banner._remove = function() {
+    clearTimeout(bannerTimer);
+    if (banner.parentNode) banner.parentNode.removeChild(banner);
+  };
+  window._confirmBanner = banner;
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    new Notification('3D Hex — Confirmation Needed', { body: msg, icon: '' });
+  } else if (Notification.permission !== 'denied' && !notifyPermissionRequested) {
+    notifyPermissionRequested = true;
+    Notification.requestPermission().then(function(perm) {
+      if (perm === 'granted')
+        new Notification('3D Hex — Confirmation Needed', { body: msg, icon: '' });
+    });
+  }
+}
+
 // ── Initialise Socket.IO ─────────────────────────────────────────────────────
 function initSocket() {
   socket = io();   // connects back to the server that served this page
@@ -370,19 +402,15 @@ function initSocket() {
       // I am the confirmer — set flag so space bar sends confirmation regardless
       // of my local require_space_from_both_players setting
       pending_confirmation = true;
-      setTimeout(function() {
-        alert('Player ' + data.requesting_seat + ' wants to add a random red position.\n' +
-              'Press the space bar to confirm.');
-        mouse_down = 0; dragging = false;
-        refocusCanvas();
-      }, 0);
-      nf.innerHTML = 'Press space to confirm adding a random red position.';
+      notifyConfirm('Player ' + data.requesting_seat + ' wants to add a random red position. '
+                    + 'Press the space bar to confirm.');
     }
   });
 
   // random_added: both confirmed — add the site (server has already updated state)
   socket.on('random_cancelled', function() {
     pending_confirmation = false;
+    if (window._confirmBanner) { window._confirmBanner._remove(); window._confirmBanner = null; }
     nf.innerHTML = 'Random red position request was not confirmed by the other player.';
   });
 
@@ -1922,6 +1950,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       } else if (socket && (require_space_from_both_players || pending_confirmation)) {
          // pending_confirmation: this client received a pending_random from the other
          // player and must confirm via space_pressed regardless of local setting
+         if (window._confirmBanner) { window._confirmBanner._remove(); window._confirmBanner = null; }
          socket.emit('space_pressed', { seat: my_seat });
       } else {
          add_random_red_site();
