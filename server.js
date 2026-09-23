@@ -259,6 +259,13 @@ io.on('connection', (socket) => {
     broadcastState('state_update', state);
   });
 
+  // ── Cursor position relay ────────────────────────────────────────────────
+  // Relay active player's cursor position to the other client only.
+  // No state stored — purely a display hint.
+  socket.on('cursor', (data) => {
+    socket.broadcast.emit('cursor', data);
+  });
+
   // ── Chat ──────────────────────────────────────────────────────────────────
   socket.on('chat', ({ msg }) => {
     const seat = seatOf(socket.id);

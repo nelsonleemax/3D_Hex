@@ -74,6 +74,18 @@ function updateSeatBanner(msg) {
   if (el) el.textContent = msg;
 }
 
+// ── Cursor broadcast helper ──────────────────────────────────────────────────
+// Sends the current cursor position to the other client so they see the brown
+// sphere move. Only sent by the player whose turn it is, to avoid confusion.
+var lastEmittedLevel = -1, lastEmittedK = -1;
+function emitCursor() {
+  if (!socket || my_seat === null || my_seat !== player) return;
+  if (active_level === lastEmittedLevel && active_k === lastEmittedK) return;
+  lastEmittedLevel = active_level;
+  lastEmittedK     = active_k;
+  socket.emit('cursor', { level: active_level, k: active_k });
+}
+
 // ── Refocus helper — returns keyboard focus to canvas after any alert() ────────
 // alert() steals focus to the browser's dialog. After OK is clicked the focus
 // stays on the dialog remnant, so keydown events (e.g. Enter) don't reach the
@@ -378,10 +390,21 @@ function initSocket() {
     my_seat = (my_seat === data.red_seat) ? 1 : 2;
     if (my_seat === 1) {
       updateSeatBanner('You are RED  (seat 1) — won red bid');
-      nf.innerHTML = 'You won the red bid! You are now the Red player.';
     } else {
       updateSeatBanner('You are GREEN (seat 2)');
-      nf.innerHTML = 'The other player claimed Red. You are the Green player.';
+    }
+    // Show whose turn it is now that seats are assigned.
+    // player is still 1 (red goes first by default after bid).
+    var turnMsg;
+    if (my_seat === player) {
+      turnMsg = (player === 1)
+        ? 'You are Red. Your turn. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
+        : 'You are Green. Your turn.';
+      notifyTurn(turnMsg);
+    } else {
+      nf.innerHTML = (player === 1)
+        ? 'You are Green. Waiting for Red to move.'
+        : 'You are Red. Waiting for Green to move.';
     }
   });
 
@@ -412,6 +435,15 @@ function initSocket() {
     pending_confirmation = false;
     if (window._confirmBanner) { window._confirmBanner._remove(); window._confirmBanner = null; }
     nf.innerHTML = 'Random red position request was not confirmed by the other player.';
+  });
+
+  // cursor: active player moved cursor — show brown sphere on other client
+  socket.on('cursor', function(data) {
+    if (my_seat === player) return; // we are the mover, already up to date
+    t_active_level = data.level;
+    t_active_k     = data.k;
+    // active_level/k on the watching client don't change — only t_active_level/k
+    // (which controls where the brown cursor sphere is drawn) need updating.
   });
 
   socket.on('player_list', function(seats) {
@@ -829,6 +861,7 @@ function main() {
       	      }
       	    t_active_k = new_active_k;
       	    t_active_level = new_active_level;
+      	    emitCursor();
       	    }
       	draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix,1);
       	if (true || i >= 0 && i < nsites) {
@@ -1524,6 +1557,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_level += 1;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 87: // 'w' decrease active level
@@ -1533,6 +1567,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_level -= 1;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 69: // 'e' move upper right in layer
@@ -1542,6 +1577,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 82: // 'r' move lower left in layer
@@ -1551,6 +1587,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 84: // 't' move up in layer
@@ -1560,6 +1597,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 89: // 'y' move down in layer
@@ -1569,6 +1607,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 85: // 'u' move upper left in layer
@@ -1578,6 +1617,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 73: // 'i' move lower right in layer
@@ -1587,6 +1627,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       	t_active_k = active_k;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k, player, 1);
+       emitCursor();
       	}
       break;
     case 77: // 'm' key — bid to become the red player; first bidder wins
