@@ -2070,8 +2070,10 @@ Matrix4.prototype.my_multiplyArray3 = function(p) {
 
 function make_bond_sites() {
   var i, ii, j, k, l, m, ll, kk, index, len = [], dbbond = 0;
+   // Always populate all 19 k values so clip_bond_sites has complete data.
+   // clip_bond_sites will subsequently zero out entries for k >= n_k.
    for (l = 0; l < actual_levels; ++l)
-     for (k = 0; k < n_k; ++k) {
+     for (k = 0; k < 19; ++k) {
        i = 19*l + k;
        for (j = 0; j < 7; ++j) {
          m = 14*i + j;   
@@ -2288,6 +2290,17 @@ function clip_bond_sites() {
        bond_sites[14*i+4], bond_sites[14*i+5], bond_sites[14*i+6], bond_sites[14*i+7], 
        bond_sites[14*i+8], bond_sites[14*i+9], bond_sites[14*i+10], bond_sites[14*i+11], 
        bond_sites[14*i+12], bond_sites[14*i+13]); 
+   // Also zero bonds from visible sites (k < n_k) pointing to outer-ring
+   // sites (destination k >= n_k) — these would otherwise be drawn as cylinders.
+   for (i = 0; i < actual_nsites; ++i)
+      for (j = 0; j < 14; ++j) {
+        m = bond_sites[14*i + j];
+        if (m >= 0) {
+          var dest_k = m - 19*Math.floor(m/19);
+          if (dest_k >= n_k)
+             bond_sites[14*i + j] = -1;
+          }
+        }
    for (i = 0; i < actual_nsites; ++i) 
       for (j = 0; j < 14; ++j) {
         m = bond_sites[14*i + j];
