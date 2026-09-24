@@ -140,6 +140,7 @@ function applyServerState(s) {
   var prev_random_sites   = random_sites;
   var prev_player         = player;
   var prev_winning_player = winning_player; // for reset detection
+  var prev_redturns       = redturns;
 
   actual_levels      = s.actual_levels;
   redturns           = s.redturns;
@@ -240,7 +241,9 @@ function applyServerState(s) {
   if (winning_player === 0) {
     // Don't overwrite "N random red positions have been added" message
     if (random_sites === prev_random_sites) {
-      if (player === 2) {
+      if (redturns !== prev_redturns) {
+        nf.innerHTML = 'Average red placements per turn is ' + redturns.toFixed(4);
+      } else if (player === 2) {
         nf.innerHTML = 'Green turn';
       } else {
         nf.innerHTML = 'Remaining red turns: ' + Math.ceil(red_moves).toFixed(0);
@@ -479,6 +482,10 @@ var global_debug = 0; // set to 1 to enable all console.log debug output
 var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0;
 var opacity = 0.5;
 var bond_lines = 0, line_width = 3;
+var flash_last_move = 0;
+var flash_interval_id = null;
+var flash_state = 0;
+var flash_level = -1, flash_k = -1;
 var require_space_from_both_players = 0; // when 1, both players must press space to add a random site
 var pending_confirmation = false; // true when this client has received a pending_random request and must confirm with space
 var ncyl_verts = 2*ncyl_phi;
@@ -1445,6 +1452,7 @@ function do_new_move() {
           }
           sphere_colors[19*active_level + active_k] = player;
           set_bond_colors(active_level, active_k, player, 0);
+          stopFlash();  // stop flash when this player makes a move
           my_move_in_flight = true;   // stop applyServerState clobbering cylinder_colors
           first_add = 4;
           // Tell the server
@@ -1502,12 +1510,23 @@ function add_random_red_site() {
    }
    
 function adjust_bond_sites(expand) {
-   if (show_outer_layer || expand) {
-      make_bond_sites();
-      }
+   // Always rebuild from scratch before clipping to avoid compounding corruption.
+   make_bond_sites();
    clip_bond_sites();
    }
         
+function stopFlash() {
+  if (flash_interval_id !== null) { clearInterval(flash_interval_id); flash_interval_id = null; }
+  flash_last_move = 0; flash_state = 0;
+}
+function startFlash() {
+  stopFlash();
+  flash_level = move_active_level;
+  flash_k     = move_active_k;
+  if (flash_level < 0 || flash_k < 0 || moves === 0) return;
+  flash_last_move = 1; flash_state = 0;
+  flash_interval_id = setInterval(function() { flash_state = 1 - flash_state; }, 500);
+}
 function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
   if (global_debug) console.log("key code", ev.keyCode);
   mouse_control_key = ev.ctrlKey;
@@ -1945,8 +1964,16 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       }
       break;
     case 102: // numpad 6
-    case 54: // '6' (line width no longer supported in modern WebGL)
-      nf.innerHTML = "Key 6 currently has no effect.";
+    case 54: // '6' toggle flash of other player's last move
+      if (flash_last_move) {
+        stopFlash();
+        nf.innerHTML = "Flash off.";
+      } else {
+        startFlash();
+        nf.innerHTML = flash_last_move
+          ? "Flashing other player's last move."
+          : "No move to flash yet.";
+      }
       break;
     case 103: // numpad 7
     case 55: // '7' increase opacity
@@ -2413,6 +2440,10 @@ function drawspheres(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMat
          gl.uniform1i(u_compute_color, 0);
          gl.uniform4f(u_Color, 0., (2*j+1)/255., (2*k+1)/255., 1);
          }
+      else if (flash_last_move && j === flash_level && k === flash_k) {
+         // Flash between other player's color and white every 500ms
+         gl.uniform4fv(u_Color, colors[flash_state ? 0 : sphere_colors[i]]);
+         }
       else if (j == t_active_level && k == t_active_k) { 
          if (sphere_colors[i] == 0) 
             gl.uniform4fv(u_Color, colors[3 + c_add]);
@@ -2475,7 +2506,7 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
   // draw context lines for bonds touching hidden spheres.
   var bl_l_min = context_octahedra ? 0             : start_level;
   var bl_l_max = context_octahedra ? actual_levels  : end_level;
-  var bl_k_max = context_octahedra ? 19            : n_k;
+  var bl_k_max = (context_octahedra || n_k < 19)  ? 19 : n_k;
 
   for (j = jstart; j < jend; j += 1) {
    for (var l = bl_l_min; l < bl_l_max; ++l) {
@@ -2773,8 +2804,8 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
   // (only_near_cursor, level clip, or outer-layer clip via ';').
   // draw_bond_lines already skips bonds between two visible spheres (they are
   // drawn as cylinders above); it only draws bonds touching hidden spheres.
-  if (display_context_bonds &&
-      (only_near_cursor || start_level > 0 || end_level < actual_levels || n_k < 19)) {
+  // Context bonds only for '0' and ';' modes, not for c/n/v/b layer clipping
+  if (display_context_bonds && (only_near_cursor || n_k < 19)) {
       gl.uniform1i(u_compute_color, 0);
       draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
       gl.uniform1i(u_compute_color, 1);
