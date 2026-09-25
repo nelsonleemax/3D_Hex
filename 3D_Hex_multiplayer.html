@@ -2594,17 +2594,22 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
   gl.uniform4f(u_Color, 1.0, 0.9, 0.8, 1.0);
   // gl.uniformMatrix4fv(u_NormalMatrix, false, normalMatrix.elements);
   gl.uniform4f(u_Color, 0.3, 1.0, 0.9, 1.0);
-  for (j = jstart; j < jend; j += 1) { // calculate the rotation and scale;
-    s_normalMatrix.setRotate(zrot[j], 0., 0., 1.);
-    let ry = yrot[j];
+  // Iterate j=0..13: forward (0-6) and reverse (7-13) bond direction entries.
+  // Reverse entries are needed to draw cylinders where the bond's "forward"
+  // direction (j=0-6) is stored at an outer-ring or hidden site that was
+  // zeroed by clip_bond_sites, but the inner-ring site still has the reverse
+  // entry (j=7-13) pointing back. We draw from the reverse entry only when
+  // the corresponding forward entry at the destination has been zeroed.
+  for (j = jstart; j < Math.min(jend + 7, 14); j += 1) {
+    var jdraw = j < 7 ? j : j - 7; // cylinder orientation index (always 0-6)
+    s_normalMatrix.setRotate(zrot[jdraw], 0., 0., 1.);
+    let ry = yrot[jdraw];
     if (ry != 0.) 
       s_normalMatrix.rotate(ry, 0., 1., 0.);
-    s_normalMatrix.rotate(xrot[j], 1., 0., 0.);
+    s_normalMatrix.rotate(xrot[jdraw], 1., 0., 0.);
     t_normalMatrix.set(normalMatrix);
     t_normalMatrix.multiply(s_normalMatrix);
     gl.uniformMatrix4fv(u_NormalMatrix, false, t_normalMatrix.elements);
-    // gl.uniform4f(u_Color, 0.2*j, .3+.1*j, -.4 +.2*j, 1.);
-    // for (i = 0; i < actual_nsites)
     for (var l = start_level; l < end_level; ++l) {
 
      if (!only_near_cursor || Math.abs(l - t_active_level) <= near_level) { 
@@ -2614,7 +2619,10 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
        mm = 14*i + j;
        n = bond_sites[mm];
        if (n >= 0) {
-         m = 7*i + j;
+         // For reverse entries (j>=7): skip if the forward entry at the
+         // destination still exists (it would draw this cylinder already).
+         if (j >= 7 && bond_sites[14*n + (j-7)] >= 0) continue;
+         m = 7*i + jdraw;
          if (cylinder_colors[m] == 0 && suppress_white_bonds)
             continue;
          nl = Math.floor(n/19);
@@ -2633,14 +2641,14 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
          v_modelMatrix.multiply(normalMatrix);
   	 v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
   	 v_modelMatrix.multiply(s_normalMatrix);
-  	 v_modelMatrix.scale(r_cyl, yscale[j], r_cyl); 
+  	 v_modelMatrix.scale(r_cyl, yscale[jdraw], r_cyl); 
   	 gl.uniformMatrix4fv(u_ModelMatrix, false, v_modelMatrix.elements);
   	 g_MvpMatrix.set(viewProjMatrix);
   	 g_MvpMatrix.multiply(v_modelMatrix);
   	 v_modelMatrix.set(unrotated_normalMatrix);
   	 v_modelMatrix.translate(sites[3*i], sites[3*i+1], sites[3*i+2]);
   	 v_modelMatrix.multiply(s_normalMatrix);
-  	 v_modelMatrix.scale(1, yscale[j], 1); 
+  	 v_modelMatrix.scale(1, yscale[jdraw], 1); 
 
   	 gl.uniformMatrix4fv(u_MvpMatrix, false, g_MvpMatrix.elements);
   	 if (debug_matrix > 1 && j == 6 && l == 1 && k == 0 && frame == 1) {
