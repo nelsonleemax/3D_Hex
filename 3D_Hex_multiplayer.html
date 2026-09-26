@@ -2507,9 +2507,10 @@ function draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_Norma
     gl.lineWidth(line_width);
   // When context_octahedra is on, extend loops to cover all hidden regions so we can
   // draw context lines for bonds touching hidden spheres.
-  var bl_l_min = context_octahedra ? 0             : start_level;
-  var bl_l_max = context_octahedra ? actual_levels  : end_level;
-  var bl_k_max = (context_octahedra || n_k < 19)  ? 19 : n_k;
+  var any_layer_clip = (start_level > 0 || end_level < actual_levels);
+  var bl_l_min = (context_octahedra || any_layer_clip) ? 0             : start_level;
+  var bl_l_max = (context_octahedra || any_layer_clip) ? actual_levels  : end_level;
+  var bl_k_max = (context_octahedra || n_k < 19)       ? 19            : n_k;
 
   for (j = jstart; j < jend; j += 1) {
    for (var l = bl_l_min; l < bl_l_max; ++l) {
@@ -2816,7 +2817,7 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
   // draw_bond_lines already skips bonds between two visible spheres (they are
   // drawn as cylinders above); it only draws bonds touching hidden spheres.
   // Context bonds only for '0' and ';' modes, not for c/n/v/b layer clipping
-  if (display_context_bonds && (only_near_cursor || n_k < 19)) {
+  if (display_context_bonds && (only_near_cursor || n_k < 19 || start_level > 0 || end_level < actual_levels)) {
       gl.uniform1i(u_compute_color, 0);
       draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
       gl.uniform1i(u_compute_color, 1);
