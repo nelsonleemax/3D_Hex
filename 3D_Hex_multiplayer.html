@@ -353,23 +353,27 @@ function initSocket() {
   socket.on('win_declared', function(data) {
     if (winning_player > 0) return;  // we already detected it ourselves
     winning_player = data.winning_player;
-    // setTimeout lets the browser activate this window before showing the alert,
-    // so it appears immediately without requiring a mouse-enter event.
     setTimeout(function() {
+      var prefix = data.conceded
+        ? (data.conceding_seat === 1 ? 'Red conceded. ' : 'Green conceded. ')
+        : '';
       if (winning_player === 1) {
         ++green_wins;
-        nf.innerHTML = "Green 1D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+        nf.innerHTML = prefix + "Green 1D player wins. Red wins " + red_wins +
+                       ", green wins " + green_wins +
                        ". Press Enter key to start over with current settings.";
-        alert('Green 1D player wins. Press Enter key to start over with current settings.');
-      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
-      refocusCanvas();
+        alert(prefix + 'Green 1D player wins. Press Enter key to start over with current settings.');
+        mouse_down = 0; dragging = false;
+        refocusCanvas();
       } else {
         ++red_wins;
-        nf.innerHTML = "Red 2D player wins. Red wins " + red_wins + ", green wins " + green_wins +
+        nf.innerHTML = prefix + "Red 2D player wins. Red wins " + red_wins +
+                       ", green wins " + green_wins +
                        ". Press Enter key to start over with current settings.";
-        alert('Red 2D player wins. Press Enter key to start over with current settings.');
+        alert(prefix + 'Red 2D player wins. Press Enter key to start over with current settings.');
+        mouse_down = 0; dragging = false;
+        refocusCanvas();
       }
-      mouse_down = 0; dragging = false;
     }, 0);
   });
 
@@ -2008,6 +2012,20 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
     case 107: // numpad +
     case 187: // '=' toggle showing active_layer with yellowed sites and bonds
       yellow = 1 - yellow;
+      break;
+    case 46: // Delete key — concede the game
+      if (!socket || winning_player > 0 || moves === 0) {
+        nf.innerHTML = moves === 0
+          ? "Cannot concede before any moves have been made."
+          : "Game is already over.";
+      } else if (my_seat === null) {
+        nf.innerHTML = "Spectators cannot concede.";
+      } else {
+        alert("Press OK to concede this game. The other player will be recorded as the winner.");
+        mouse_down = 0; dragging = false;
+        refocusCanvas();
+        socket.emit('concede');
+      }
       break;
     case 220: // '\' or '|' toggle display of context bond lines
       display_context_bonds = 1 - display_context_bonds;

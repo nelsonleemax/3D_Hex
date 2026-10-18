@@ -10,6 +10,37 @@ const express = require('express');
 const http    = require('http');
 const { Server } = require('socket.io');
 const path    = require('path');
+const fs      = require('fs');
+
+// ── CSV statistics ────────────────────────────────────────────────────────────
+// Written to disk (persists within a Render session; lost on redeploy unless
+// a persistent disk is mounted at /data). Also served at GET /statistics.csv.
+// Fields: first_player, red_turns_per_move, random_sites, actual_levels, winner
+const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'statistics.csv');
+const CSV_HEADER = 'first_player,red_turns_per_move,random_sites,actual_levels,winner\n';
+
+// Load existing file or create with header
+let csvData = '';
+try {
+  csvData = fs.readFileSync(CSV_PATH, 'utf8');
+  if (!csvData.startsWith('first_player')) csvData = CSV_HEADER + csvData;
+} catch (e) {
+  csvData = CSV_HEADER;
+  try { fs.writeFileSync(CSV_PATH, csvData); } catch (e2) {}
+}
+
+function appendGameResult(state, winner) {
+  const row = [
+    state.saved_first_player,
+    state.redturns.toFixed(4),
+    state.random_sites,
+    state.actual_levels,
+    winner
+  ].join(',') + '\n';
+  csvData += row;
+  try { fs.writeFileSync(CSV_PATH, csvData); } catch (e) {}
+  console.log('Game result recorded:', row.trim());
+}
 
 const app    = express();
 const server = http.createServer(app);
@@ -23,6 +54,13 @@ app.use(express.static(__dirname));
 // Serve the game when the browser requests just '/'
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '3D_Hex_multiplayer.html'));
+});
+
+// Download statistics
+app.get('/statistics.csv', (req, res) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="statistics.csv"');
+  res.send(csvData);
 });
 
 // ── Shared game state ────────────────────────────────────────────────────────
@@ -152,10 +190,19 @@ io.on('connection', (socket) => {
   socket.on('win', ({ winning_player }) => {
     if (state.winning_player > 0) return;  // already declared
     state.winning_player = winning_player;
-    // Broadcast so the OTHER client also sees winning_player, shows the alert,
-    // and can press Enter to reset.  We use a dedicated 'win_declared' event
-    // so applyServerState doesn't re-run the win test and double-alert.
+    appendGameResult(state, winning_player);
     io.emit('win_declared', { winning_player });
+  });
+
+  // ── Concede ───────────────────────────────────────────────────────────────
+  // A player presses Delete to concede; the other player wins.
+  socket.on('concede', () => {
+    const seat = seatOf(socket.id);
+    if (seat === null || state.winning_player > 0 || state.moves === 0) return;
+    const winner = seat === 1 ? 2 : 1;  // other player wins
+    state.winning_player = winner;
+    appendGameResult(state, winner);
+    io.emit('win_declared', { winning_player: winner, conceded: true, conceding_seat: seat });
   });
 
   // ── Undo ────────────────────────────────────────────────────────────────
