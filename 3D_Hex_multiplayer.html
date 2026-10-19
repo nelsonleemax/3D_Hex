@@ -2829,7 +2829,7 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
   else if (bond_lines) {
     gl.lineWidth(line_width);
     gl.uniform1i(u_compute_color, 0);
-    draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 1);
+    draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 0);
     gl.uniform1i(u_compute_color, 1);
     }
   else
