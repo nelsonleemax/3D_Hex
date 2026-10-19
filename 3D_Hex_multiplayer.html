@@ -2808,7 +2808,7 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
   }
 
 function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
-  var forward_lines = bond_lines; // bond_lines toggles cylinders<->lines
+  var forward_lines = 0; 
   // Clear color and depth buffer
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (debug_matrix > 0 && frame == 1)
