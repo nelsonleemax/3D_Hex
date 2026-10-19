@@ -1551,7 +1551,10 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       tx -= tstep;
       if (global_debug) console.log("tx", tx);
       break;
-    case 47: // slash '/'
+    case 47: // slash '/' — toggle bond cylinders vs bond lines
+      bond_lines = 1 - bond_lines;
+      nf.innerHTML = bond_lines ? "Drawing bonds as lines." : "Drawing bonds as cylinders.";
+      break;
     case 191: // my laptop's '?' key: switch first player
       //console.log("key code", ev.keyCode);
       alert("to switch first player type Enter; otherwise continue the game");
@@ -2375,7 +2378,7 @@ function set_bond_colors(l, k, player, temporary) {
          if (global_debug && dbg)
                 if (global_debug) console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
          }
-       if (sphere_colors[bond_sites[mm]] == player) {
+       if (sphere_colors[ii] == player) {
           cylinder_colors[7*bond_sites[mm]+j] = player;
           if (global_debug && dbg)
               if (global_debug) console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
@@ -2640,7 +2643,8 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
        if (n >= 0) {
          // For reverse entries (j>=7): skip if the forward entry at the
          // destination still exists (it would draw this cylinder already).
-         if (j >= 7 && bond_sites[14*n + (j-7)] >= 0) continue;
+         if (j >= jend && j < 7) continue; // skip gap between forward jend and reverse start
+       if (j >= 7 && bond_sites[14*n + (j-7)] >= 0) continue;
          m = 7*i + jdraw;
          if (cylinder_colors[m] == 0 && suppress_white_bonds)
             continue;
@@ -2804,7 +2808,7 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
   }
 
 function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
-  var forward_lines = 0;
+  var forward_lines = bond_lines; // bond_lines toggles cylinders<->lines
   // Clear color and depth buffer
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (debug_matrix > 0 && frame == 1)
