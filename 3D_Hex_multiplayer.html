@@ -2359,8 +2359,7 @@ function set_bond_colors(l, k, player, temporary) {
                 if (global_debug) console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
                   "bond end", bond_sites[mm]);
          }
-       if (sphere_colors[bond_sites[mm]] == player &&
-              (sphere_colors[ii] == player || temporary)) {
+       if (sphere_colors[bond_sites[mm]] == player) {
           cylinder_colors[m] = player;
           if (global_debug && dbg)
               if (global_debug) console.log("1 cylinder colors[", m, "] = ", player, "j", j,
@@ -2370,25 +2369,8 @@ function set_bond_colors(l, k, player, temporary) {
       else if(temporary)
         saved_active_bond_m[j] = -1;
 
-     m = m+7;
-     mm = mm+7;
-     if (bond_sites[mm] >= 0) {
-       if (temporary) {
-       	 saved_cylinder_colors[j] = cylinder_colors[m];
-         saved_active_bond_m[j] = m;
-         if (global_debug && dbg)
-                if (global_debug) console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
-         }
-       if (sphere_colors[ii] == player &&
-              (sphere_colors[bond_sites[mm]] == player || temporary)) {
-          cylinder_colors[7*bond_sites[mm]+j] = player;
-          if (global_debug && dbg)
-              if (global_debug) console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
-                "bond end", bond_sites[mm]);
-          }
-       }
-      else if(temporary)
-        saved_active_bond_m[j] = -1;
+     // (reverse-entry coloring removed — first loop handles bonds at ii correctly,
+     //  and drawcylinders reads both forward and reverse entries to find all bonds)
     }
   } 
    
