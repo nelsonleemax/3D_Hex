@@ -2359,7 +2359,8 @@ function set_bond_colors(l, k, player, temporary) {
                 if (global_debug) console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
                   "bond end", bond_sites[mm]);
          }
-       if (sphere_colors[bond_sites[mm]] == player) {
+       if (sphere_colors[bond_sites[mm]] == player &&
+              (sphere_colors[ii] == player || temporary)) {
           cylinder_colors[m] = player;
           if (global_debug && dbg)
               if (global_debug) console.log("1 cylinder colors[", m, "] = ", player, "j", j,
@@ -2378,7 +2379,8 @@ function set_bond_colors(l, k, player, temporary) {
          if (global_debug && dbg)
                 if (global_debug) console.log("2 saved j", j, "m", m, "color", cylinder_colors[m]);
          }
-       if (sphere_colors[ii] == player) {
+       if (sphere_colors[ii] == player &&
+              (sphere_colors[bond_sites[mm]] == player || temporary)) {
           cylinder_colors[7*bond_sites[mm]+j] = player;
           if (global_debug && dbg)
               if (global_debug) console.log("2 cylinder colors[", 7*bond_sites[mm]+j, "] = ", player, "j", j,
@@ -2808,7 +2810,7 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
   }
 
 function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, kind) {
-  var forward_lines = 0; 
+  var forward_lines = 0; // debugging only — always 0 in production
   // Clear color and depth buffer
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   if (debug_matrix > 0 && frame == 1)
@@ -2827,6 +2829,9 @@ function draw(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, ki
     gl.uniform1i(u_compute_color, 1);
     }
   else if (bond_lines) {
+    // bond_lines=1: draw all bonds as lines instead of cylinders.
+    // Last parameter 0 = normal pass (not context pass), so draw_as_normal fires
+    // for visible bonds (both endpoints in visible region).
     gl.lineWidth(line_width);
     gl.uniform1i(u_compute_color, 0);
     draw_bond_lines(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, 0);
