@@ -2326,7 +2326,10 @@ function clip_bond_sites() {
 function set_bond_colors(l, k, player, temporary) {
    var ii, i, j, m, mm, n, dbg = 0;
    ii = 19*l + k;
-   /*
+
+   // Loop 1 (original): find all sites i that have a forward bond pointing TO ii.
+   // Color cylinder_colors[7*i+j] when sphere_colors[i] == player.
+   // This correctly colors bonds drawn FROM neighbor i TOWARD ii.
    for (i = 0; i < actual_nsites; ++i) {
      for (j = 0; j < 7; ++j) {
         m = 7*i + j;
@@ -2336,42 +2339,31 @@ function set_bond_colors(l, k, player, temporary) {
               n = j+7;
               saved_cylinder_colors[n] = cylinder_colors[m];
               saved_active_bond_m[n] = m;
-              if (global_debug && dbg)
-                if (global_debug) console.log("1 saved n", n, "m", m, "color", cylinder_colors[m]); 
               }
-            if (sphere_colors[i] == player) {
-            	cylinder_colors[m] = player;
-              if (global_debug && dbg)
-                if (global_debug) console.log("1 cylinder colors[", m, "] = ", player);
+           if (sphere_colors[i] == player) {
+              cylinder_colors[m] = player;
               }
-            }
-         }
-       }
-    */
-    for (j = 0; j < 7; ++j) {
+           }
+        }
+     }
+
+   // Loop 2: color forward bonds FROM ii toward neighbors when neighbor is player color.
+   // This handles bonds drawn FROM ii TOWARD neighbors.
+   for (j = 0; j < 7; ++j) {
       m = 7*ii + j;
       mm = 14*ii + j;
       if (bond_sites[mm] >= 0) {
-       if (temporary) {
-       	 saved_cylinder_colors[j] = cylinder_colors[m];
-         saved_active_bond_m[j] = m;
-         if (global_debug && dbg)
-                if (global_debug) console.log("1 saved j", j, "m", m, "color", cylinder_colors[m],
-                  "bond end", bond_sites[mm]);
+         if (temporary) {
+            saved_cylinder_colors[j] = cylinder_colors[m];
+            saved_active_bond_m[j] = m;
+            }
+         if (sphere_colors[bond_sites[mm]] == player) {
+            cylinder_colors[m] = player;
+            }
          }
-       if (sphere_colors[bond_sites[mm]] == player) {
-          cylinder_colors[m] = player;
-          if (global_debug && dbg)
-              if (global_debug) console.log("1 cylinder colors[", m, "] = ", player, "j", j,
-                "bond end", bond_sites[mm]);
-          }
-       }
-      else if(temporary)
-        saved_active_bond_m[j] = -1;
-
-     // (reverse-entry coloring removed — first loop handles bonds at ii correctly,
-     //  and drawcylinders reads both forward and reverse entries to find all bonds)
-    }
+      else if (temporary)
+         saved_active_bond_m[j] = -1;
+      }
   } 
    
 function restore_bond_colors(l, k) {
