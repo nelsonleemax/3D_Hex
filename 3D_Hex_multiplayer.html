@@ -2367,16 +2367,29 @@ function set_bond_colors(l, k, player, temporary) {
   } 
    
 function restore_bond_colors(l, k) {
-   var i, j, m, db_restore = 0;
+   // Restore bond colors at a cursor position back to their permanent state.
+   // Only zero a cylinder slot if the bond is NOT between two permanently
+   // claimed sites of the same color — those were set by set_bond_colors(temporary=0)
+   // and must not be erased by cursor movement.
+   var i, j, m, n, db_restore = 0;
    i = 19*l + k;
    if (global_debug && db_restore)
       if (global_debug) console.log("restore_bond_colors", "l", l, "k", k);
-   else
+   else {
      for (j = 0; j < 7; ++j) {
-      cylinder_colors[7*i + j] = 0;
-      m = bond_sites[14*i+j+7];
-      if (m >= 0) 
-         cylinder_colors[7*m+j] = 0;
+       // Forward bond FROM i in direction j
+       n = bond_sites[14*i + j];
+       // Only zero if i and neighbor n are NOT both the same non-zero player color
+       if (!(sphere_colors[i] > 0 && n >= 0 && sphere_colors[n] == sphere_colors[i]))
+         cylinder_colors[7*i + j] = 0;
+       // Reverse: bond FROM m in direction j TOWARD i
+       m = bond_sites[14*i + j + 7];
+       if (m >= 0) {
+         // Only zero if m and i are NOT both the same non-zero player color
+         if (!(sphere_colors[m] > 0 && sphere_colors[i] == sphere_colors[m]))
+           cylinder_colors[7*m + j] = 0;
+         }
+       }
      }
    }
     	      
