@@ -200,6 +200,7 @@ function applyServerState(s) {
     t_active_k         = 0;
     tentative_move_pending = false;
     pending_confirmation   = false;
+    move_history           = [];
     for (var ci = 0; ci < actual_nsites; ++ci) sphere_colors[ci] = 0;
     for (var ci = 0; ci < 7*actual_nsites; ++ci) cylinder_colors[ci] = 0;
     nf.innerHTML = (player === 1)
@@ -514,6 +515,7 @@ var ntriangles = 44 + sphere_triangles + 2*(ncyl_phi - 1) + 72;
 var start_level = 0, end_level = actual_levels;
 var active_level = Math.floor(actual_levels/2), t_active_level = Math.floor(actual_levels/2);
 var active_k = 0, t_active_k = 0, moce_aclive_level = 0, move_active_k = 0;
+var move_history = []; // stack of {level, k} for all moves in current red turn
 var active_i = 19*active_level + active_k;
 var sphere_colors = new Int16Array(nsites);
 var cylinder_colors = new Int16Array(n_cylinders).fill(0);
@@ -1400,18 +1402,19 @@ function initVertexBuffers(gl) {
 }
 
 function undo() {
+        // Pop the most recent move from the history stack
+        var undo_target = (move_history.length > 0)
+          ? move_history.pop()
+          : { level: move_active_level, k: move_active_k };
         if (socket) {
-          // Apply locally for immediate feedback, then tell the server.
-          // Send the current move count so the server can detect race conditions
-          // (another player moved between when we saw the state and sent the undo).
-          sphere_colors[19*move_active_level + move_active_k] = 0;
-          restore_bond_colors(move_active_level, move_active_k);
+          sphere_colors[19*undo_target.level + undo_target.k] = 0;
+          restore_bond_colors(undo_target.level, undo_target.k);
           socket.emit('undo', { expected_moves: moves });
           socket.emit('cylinder_delta', Array.from(cylinder_colors));
         } else {
           // offline fallback
-	  sphere_colors[19*move_active_level + move_active_k] = 0;
-	  restore_bond_colors(move_active_level, move_active_k);
+	  sphere_colors[19*undo_target.level + undo_target.k] = 0;
+	  restore_bond_colors(undo_target.level, undo_target.k);
 	  if(player == 1 && red_moves_incremented) {
 	     player = 2;
 	     nf.innerHTML = "Green turn";
@@ -1456,6 +1459,7 @@ function do_new_move() {
           }
           sphere_colors[19*active_level + active_k] = player;
           set_bond_colors(active_level, active_k, player, 0);
+          move_history.push({ level: active_level, k: active_k });
           stopFlash();  // stop flash when this player makes a move
           my_move_in_flight = true;   // stop applyServerState clobbering cylinder_colors
           first_add = 4;
@@ -1472,6 +1476,7 @@ function do_new_move() {
           do_drawing_cylinder_output = 1;
           sphere_colors[19*active_level + active_k] = player;
           set_bond_colors(active_level, active_k, player, 0);
+          move_history.push({ level: active_level, k: active_k });
           if (player == 1) {
              red_moves = red_moves - 1;
              nf.innerHTML = "Remaining red turns: " +
@@ -1481,6 +1486,7 @@ function do_new_move() {
                 red_moves_incremented = 1;
                 nf.innerHTML = "Green turn";
                 player = 2;
+                move_history = []; // red turn complete — clear undo history
                 }
              else
                 red_moves_incremented = 0;
@@ -1489,6 +1495,7 @@ function do_new_move() {
              player = 1;
              nf.innerHTML = "Remaining red turns: " +
                   Math.ceil(red_moves).toFixed(0);
+             move_history = []; // green move complete — clear undo history
              }
           if (global_debug) console.log("red_moves", red_moves);
           ++moves;
@@ -2367,28 +2374,36 @@ function set_bond_colors(l, k, player, temporary) {
   } 
    
 function restore_bond_colors(l, k) {
-   // Restore bond colors at a cursor position back to their permanent state.
-   // Only zero a cylinder slot if the bond is NOT between two permanently
-   // claimed sites of the same color — those were set by set_bond_colors(temporary=0)
-   // and must not be erased by cursor movement.
-   var i, j, m, n, db_restore = 0;
+   // Zero the tentative/preview bond colors at (l,k), then recompute the
+   // permanent bond colors for all bonds touching this site.
+   var i, j, m, n, p;
    i = 19*l + k;
-   if (global_debug && db_restore)
-      if (global_debug) console.log("restore_bond_colors", "l", l, "k", k);
-   else {
-     for (j = 0; j < 7; ++j) {
-       // Forward bond FROM i in direction j
-       n = bond_sites[14*i + j];
-       // Only zero if i and neighbor n are NOT both the same non-zero player color
-       if (!(sphere_colors[i] > 0 && n >= 0 && sphere_colors[n] == sphere_colors[i]))
-         cylinder_colors[7*i + j] = 0;
-       // Reverse: bond FROM m in direction j TOWARD i
-       m = bond_sites[14*i + j + 7];
-       if (m >= 0) {
-         // Only zero if m and i are NOT both the same non-zero player color
-         if (!(sphere_colors[m] > 0 && sphere_colors[i] == sphere_colors[m]))
-           cylinder_colors[7*m + j] = 0;
-         }
+   // Step 1: zero all cylinder slots for bonds touching i
+   for (j = 0; j < 7; ++j) {
+     cylinder_colors[7*i + j] = 0;         // forward bonds FROM i
+     m = bond_sites[14*i + j + 7];         // reverse: bond FROM m TOWARD i
+     if (m >= 0)
+       cylinder_colors[7*m + j] = 0;
+     }
+   // Step 2: recompute permanent colors for all bonds touching i.
+   // For each neighbor of i, if both i and neighbor are the same claimed color,
+   // color the bond. Check both forward and reverse entries.
+   p = sphere_colors[i];  // color of i (0 if unclaimed/just undone)
+   for (j = 0; j < 7; ++j) {
+     // Forward bond FROM i toward n
+     n = bond_sites[14*i + j];
+     if (n >= 0 && p > 0 && sphere_colors[n] == p)
+       cylinder_colors[7*i + j] = p;
+     // Bond FROM m toward i (stored as reverse entry at i, forward entry at m)
+     m = bond_sites[14*i + j + 7];
+     if (m >= 0 && sphere_colors[m] > 0 && sphere_colors[m] == p)
+       cylinder_colors[7*m + j] = sphere_colors[m];
+     // Also recompute m's other forward bonds in case they were affected
+     // (m's bond toward i was zeroed in step 1, recheck m's neighbors)
+     if (m >= 0 && sphere_colors[m] > 0) {
+       // Recolor m->i bond if i is same color as m
+       if (p == sphere_colors[m])
+         cylinder_colors[7*m + j] = sphere_colors[m];
        }
      }
    }
