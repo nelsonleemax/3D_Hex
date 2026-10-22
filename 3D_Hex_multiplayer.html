@@ -157,6 +157,7 @@ function applyServerState(s) {
   move_active_level  = s.move_active_level;
   move_active_k      = s.move_active_k;
   undo_calls         = s.undo_calls;
+  if (s.undo_seat !== undefined) undo_seat = s.undo_seat;
 
   // Board arrays — always copy sphere_colors.
   var ns = 19 * actual_levels;
@@ -201,6 +202,7 @@ function applyServerState(s) {
     tentative_move_pending = false;
     pending_confirmation   = false;
     move_history           = [];
+    undo_seat              = 0;
     for (var ci = 0; ci < actual_nsites; ++ci) sphere_colors[ci] = 0;
     for (var ci = 0; ci < 7*actual_nsites; ++ci) cylinder_colors[ci] = 0;
     nf.innerHTML = (player === 1)
@@ -384,7 +386,8 @@ function initSocket() {
     // Re-apply the move that was optimistically undone: restore sphere color and bonds.
     sphere_colors[19*move_active_level + move_active_k] = 3 - player; // mover's color
     set_bond_colors(move_active_level, move_active_k, 3 - player, 0);
-    undo_calls = 1;  // prevent further undo attempts
+    undo_calls = 1;
+    undo_seat = 0;
     mouse_down = 0; dragging = false;
     alert(data.message + '\nThe board has been restored.');
   });
@@ -485,6 +488,7 @@ var ncyl_phi = 9;
 var frame = 0, db_cylinder_calls = 0;
 var global_debug = 0; // set to 1 to enable all console.log debug output
 var draw_octahedron = 0, undo_calls = 0, red_moves_incremented = 0, new_move = 0;
+var undo_seat = 0; // 1=red 2=green 0=nobody — who owns undo capability
 var opacity = 0.5;
 var bond_lines = 0, line_width = 3;
 var flash_last_move = 0;
@@ -1460,6 +1464,7 @@ function do_new_move() {
           sphere_colors[19*active_level + active_k] = player;
           set_bond_colors(active_level, active_k, player, 0);
           move_history.push({ level: active_level, k: active_k });
+          undo_seat = my_seat;
           stopFlash();  // stop flash when this player makes a move
           my_move_in_flight = true;   // stop applyServerState clobbering cylinder_colors
           first_add = 4;
@@ -1477,6 +1482,7 @@ function do_new_move() {
           sphere_colors[19*active_level + active_k] = player;
           set_bond_colors(active_level, active_k, player, 0);
           move_history.push({ level: active_level, k: active_k });
+          undo_seat = (player == 1) ? 1 : 2;
           if (player == 1) {
              red_moves = red_moves - 1;
              nf.innerHTML = "Remaining red turns: " +
@@ -1495,7 +1501,8 @@ function do_new_move() {
              player = 1;
              nf.innerHTML = "Remaining red turns: " +
                   Math.ceil(red_moves).toFixed(0);
-             move_history = []; // green move complete — clear undo history
+             move_history = [];
+             undo_seat = 0;
              }
           if (global_debug) console.log("red_moves", red_moves);
           ++moves;
@@ -1569,13 +1576,15 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
          waiting_for_confirmation = 1;
       break;
     case  8: // backspace: cancel previous move
-      if (undo_calls == 0) {
-         // In multiplayer, only the player who made the last move may undo it.
-         // After a move player has already switched, so the mover was (3-player).
-         if (socket && my_seat !== null && my_seat !== (3 - player)) {
+      if (move_history.length > 0 || undo_calls == 0) {
+         if (socket && my_seat !== null && undo_seat !== 0 && my_seat !== undo_seat) {
            alert("You can only undo your own moves.");
            mouse_down = 0; dragging = false;
-      refocusCanvas();
+           refocusCanvas();
+           break;
+           }
+         if (socket && undo_seat === 0 && move_history.length === 0) {
+           nf.innerHTML = "Nothing to undo.";
            break;
            }
          alert("to cancel previous move type Enter; otherwise continue the game");
@@ -1812,12 +1821,14 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       break;
 	
     case 90: // 'z' key move model closer / ctrl-Z undo
-      if(mouse_control_key && undo_calls == 0) {
-         // In multiplayer, only the player who made the last move may undo it.
-         if (socket && my_seat !== null && my_seat !== (3 - player)) {
+      if(mouse_control_key && (move_history.length > 0 || undo_calls == 0)) {
+         if (socket && my_seat !== null && undo_seat !== 0 && my_seat !== undo_seat) {
            alert("You can only undo your own moves.");
            mouse_down = 0; dragging = false;
-      refocusCanvas();
+           refocusCanvas();
+           }
+         else if (socket && undo_seat === 0 && move_history.length === 0) {
+           nf.innerHTML = "Nothing to undo.";
            }
          else {
            undo();

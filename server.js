@@ -95,6 +95,7 @@ function makeDefaultState() {
     move_active_level  : 0,
     move_active_k      : 0,
     undo_calls         : 0,
+    undo_seat          : 0,   // 1=red 2=green 0=nobody
     red_bidder         : null,   // seat of player who bid for red, null if not yet bid
     pending_random     : null,   // { seat, level, k } when one player pressed space awaiting confirmation
     require_space      : 0,       // when 1, both players must press space to add a random site
@@ -175,6 +176,7 @@ io.on('connection', (socket) => {
     }
 
     state.moves += 1;
+    state.undo_seat = seatOf(socket.id);
     broadcastState('state_update', state);
   });
 
@@ -238,6 +240,7 @@ io.on('connection', (socket) => {
       state.player = 2;
     }
     state.undo_calls            = 1;
+    state.undo_seat             = seatOf(socket.id); // undo stays with undoing player
     state.red_moves_incremented = false;
     state.moves                 = Math.max(0, state.moves - 1);
     broadcastState('state_update', state);
