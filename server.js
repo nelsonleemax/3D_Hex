@@ -211,11 +211,16 @@ io.on('connection', (socket) => {
   // Payload: { expected_moves } — the move count the client thinks is current.
   // If it doesn't match state.moves, the other player has moved in the meantime
   // (race condition) and the undo is rejected with a 'undo_rejected' event.
-  socket.on('undo', ({ expected_moves }) => {
+  socket.on('undo', ({ expected_moves, target_level, target_k, undoing_seat }) => {
     const seat = seatOf(socket.id);
-    if (seat === null || state.undo_calls !== 0) return;
+    if (seat === null) return;
 
-    // Race condition: another move arrived before the undo — reject it.
+    // Allow undo if:
+    //  - undo_calls is 0 (first undo in a sequence), OR
+    //  - undo_seat matches this player (continuing a multi-step undo)
+    if (state.undo_calls !== 0 && state.undo_seat !== seat) return;
+
+    // Race condition check
     if (expected_moves !== undefined && expected_moves !== state.moves) {
       socket.emit('undo_rejected', {
         message: 'Too late to undo — the other player has already moved.'
@@ -223,29 +228,34 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const i = 19 * state.move_active_level + state.move_active_k;
+    // Use the target from the client's move_history stack if provided,
+    // otherwise fall back to move_active_level/k
+    const ul = (target_level !== undefined) ? target_level : state.move_active_level;
+    const uk = (target_k    !== undefined) ? target_k    : state.move_active_k;
+    const i  = 19 * ul + uk;
     state.sphere_colors[i] = 0;
 
-    // The player who made the last move was (3 - state.player), since state.player
-    // already advanced after the move.  Restore it to that player so they can
-    // make a replacement move.
-    const mover = 3 - state.player;   // who made the move being undone
+    // Determine who made this move: use undoing_seat from client if provided.
+    // This avoids the bug where (3 - state.player) gives the wrong mover
+    // during red sub-moves when state.player hasn't switched yet.
+    const mover = undoing_seat || seat;
     if (mover === 1) {
-      // Undoing a red move: restore red's remaining turns
-      if (state.red_moves_incremented) state.red_moves -= state.redturns;
+      // Undoing a red sub-move: restore one red placement
+      if (state.red_moves_incremented) {
+        state.red_moves -= state.redturns;
+        state.red_moves_incremented = false;
+        state.player = 1; // was green's turn, now back to red
+      }
       state.red_moves += 1;
       state.player = 1;
     } else {
-      // Undoing a green move: give the turn back to green
+      // Undoing a green move
       state.player = 2;
     }
-    state.undo_calls            = 1;
-    state.undo_seat             = seatOf(socket.id); // undo stays with undoing player
-    state.red_moves_incremented = false;
-    state.moves                 = Math.max(0, state.moves - 1);
+    state.undo_calls  = 1;
+    state.undo_seat   = seat; // undo stays with undoing player
+    state.moves       = Math.max(0, state.moves - 1);
     broadcastState('state_update', state);
-    // cylinder_colors reset is handled client-side via restore_bond_colors;
-    // client will send a cylinder_delta after undo
   });
 
   // ── Reset (new game) ─────────────────────────────────────────────────────

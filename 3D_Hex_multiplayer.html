@@ -1413,7 +1413,12 @@ function undo() {
         if (socket) {
           sphere_colors[19*undo_target.level + undo_target.k] = 0;
           restore_bond_colors(undo_target.level, undo_target.k);
-          socket.emit('undo', { expected_moves: moves });
+          socket.emit('undo', {
+            expected_moves: moves,
+            target_level:   undo_target.level,
+            target_k:       undo_target.k,
+            undoing_seat:   my_seat
+          });
           socket.emit('cylinder_delta', Array.from(cylinder_colors));
         } else {
           // offline fallback
