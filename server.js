@@ -81,7 +81,7 @@ function makeDefaultState() {
 
     // in-progress state
     player             : 1,
-    red_moves          : 2,        // starts equal to redturns
+    red_moves          : 2,        // starts at floor(redturns)
     red_moves_incremented : false,
     moves              : 0,
     random_sites       : 0,
@@ -265,7 +265,7 @@ io.on('connection', (socket) => {
     state                    = makeDefaultState();
     state.player             = saved_first_player;
     state.saved_first_player = saved_first_player;
-    state.red_moves          = state.redturns;
+    state.red_moves          = Math.floor(state.redturns);
     // random_sites is 0 in default state — client uses this to detect a true reset
     broadcastState('state_update', state);
   });
@@ -279,7 +279,9 @@ io.on('connection', (socket) => {
     }
     if (changes.redturns !== undefined) {
       state.redturns  = changes.redturns;
-      state.red_moves = state.redturns;  // reset remaining moves to new rate
+      // Start with floor(redturns) so first red turn gives floor placements,
+      // not ceil. The fractional part accumulates across turns as designed.
+      state.red_moves = Math.floor(state.redturns);
     }
     if (changes.add_random !== undefined) {
       const { level, k } = changes.add_random;
