@@ -2738,6 +2738,9 @@ function drawcylinders(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
       
 function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix, context_pass) {
   var i, k, l, m, n, ii, mm, nn, sm, sn, c_add, dbg = 0;
+  // A tentative (cursor) red placement is only previewed on the RED player's own
+  // screen while it is red's turn -- never on green's screen.
+  var red_tent = (!socket || my_seat === 1) && player == 1;
   
   normalMatrix.setRotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis
   normalMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis
@@ -2782,9 +2785,9 @@ function drawtriangles(gl, viewProjMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalM
    	      nn = bond_sites[14*i + n];
 
    	      if (mm >= 0 && nn >= 0) {
-   	        if( (sphere_colors[i]  == 1 ||  (player == 1 &&  i == active_i) ) &&
-   	            (sphere_colors[mm] == 1 ||  (player == 1 && mm == active_i) ) &&
-   	            (sphere_colors[nn] == 1 ||  (player == 1 && nn == active_i) ) ) {
+   	        if( (sphere_colors[i]  == 1 ||  (red_tent && i == active_i) ) &&
+   	            (sphere_colors[mm] == 1 ||  (red_tent && mm == active_i) ) &&
+   	            (sphere_colors[nn] == 1 ||  (red_tent && nn == active_i) ) ) {
    	          ml = Math.floor(mm/19);
    	          mk = mm - 19*ml;
    	          nl = Math.floor(nn/19);
