@@ -1,10 +1,14 @@
-// server.js  —  3D Hex multiplayer server
+// server.js  —  3D Hex multiplayer server with lobby
 // Run with:  node server.js
 // Requires:  npm install express socket.io
 //
-// Two players connect; the server holds the authoritative shared game state
-// and broadcasts every change to both clients.  Each client keeps its own
-// display/camera settings independently.
+// Many games can run at once.  Each game lives in its own "room" with its own
+// shared state and exactly two seats.  Players get into a room in one of three ways:
+//   * "Play with a stranger"  — the server pairs two waiting players.
+//   * "Create private game"   — the server makes a room and a code like HEX-4827;
+//                               the creator gives the code (or a link) to a friend.
+//   * "Join private game"     — the friend enters the code (or opens the link).
+// Each client keeps its own display/camera settings; only game state is shared.
 
 const express = require('express');
 const http    = require('http');
@@ -16,10 +20,10 @@ const fs      = require('fs');
 // Written to disk (persists within a Render session; lost on redeploy unless
 // a persistent disk is mounted at /data). Also served at GET /statistics.csv.
 // Fields: first_player, red_turns_per_move, random_sites, actual_levels, winner
+// One file for all rooms: every completed game from every room is one row.
 const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'statistics.csv');
 const CSV_HEADER = 'first_player,red_turns_per_move,random_sites,actual_levels,winner\n';
 
-// Load existing file or create with header
 let csvData = '';
 try {
   csvData = fs.readFileSync(CSV_PATH, 'utf8');
@@ -51,7 +55,7 @@ const io     = new Server(server, {
 // Serve game files from the same directory as server.js
 app.use(express.static(__dirname));
 
-// Serve the game when the browser requests just '/'
+// Serve the game when the browser requests just '/'  (also with ?room=HEX-1234)
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '3D_Hex_multiplayer.html'));
 });
@@ -63,14 +67,13 @@ app.get('/statistics.csv', (req, res) => {
   res.send(csvData);
 });
 
-// ── Shared game state ────────────────────────────────────────────────────────
+// ── Game state (one per room) ────────────────────────────────────────────────
 // This mirrors the variables in the client that both players must agree on.
-// It is reset whenever a new game begins (either player presses Enter after a win
-// or Tab-Enter to restart).
 
 const DEFAULT_LEVELS   = 9;
-const MAX_SITES        = 19 * 20;   // nlevels = 20 max
-const MAX_CYLINDERS    = 7 * 19 * 20;
+const MAX_LEVELS       = 20;
+const MAX_SITES        = 19 * MAX_LEVELS;
+const MAX_CYLINDERS    = 7 * 19 * MAX_LEVELS;
 
 function makeDefaultState() {
   return {
@@ -95,33 +98,109 @@ function makeDefaultState() {
     move_active_level  : 0,
     move_active_k      : 0,
     undo_calls         : 0,
-    undo_seat          : 0,   // 1=red 2=green 0=nobody
+    undo_seat          : 0,      // 1=red 2=green 0=nobody
     red_bidder         : null,   // seat of player who bid for red, null if not yet bid
     pending_random     : null,   // { seat, level, k } when one player pressed space awaiting confirmation
-    require_space      : 0,       // when 1, both players must press space to add a random site
+    require_space      : 0,      // when 1, both players must press space to add a random site
   };
 }
 
-let state = makeDefaultState();
+// ── Rooms ────────────────────────────────────────────────────────────────────
+// room = { code, isPrivate, state, seats: {1: socketId|null, 2: socketId|null},
+//          entered: { socketId: true } }   // entered = has been sent 'welcome'
 
-// ── Player tracking ──────────────────────────────────────────────────────────
-// We allow exactly two seats: seat 1 (red, 2D player) and seat 2 (green, 1D player).
-// A third browser can connect as a spectator (read-only).
+const rooms      = new Map();   // code -> room
+const socketRoom = new Map();   // socket.id -> room code
+let   waitingStranger = null;   // socket.id of the one player waiting for a stranger
 
-const players = {};   // socket.id -> { seat: 1|2|null }
-
-function connectedSeats() {
-  return Object.values(players).map(p => p.seat).filter(s => s !== null);
+function makeRoom(isPrivate) {
+  let code;
+  do {
+    code = 'HEX-' + (1000 + Math.floor(Math.random() * 9000));
+  } while (rooms.has(code));
+  const room = {
+    code, isPrivate,
+    state: makeDefaultState(),
+    seats: { 1: null, 2: null },
+    entered: {}
+  };
+  rooms.set(code, room);
+  console.log(`room ${code} created (${isPrivate ? 'private' : 'stranger'}); rooms now ${rooms.size}`);
+  return room;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function broadcastState(eventName, data) {
-  io.emit(eventName, data);
+function roomOf(socket) {
+  const code = socketRoom.get(socket.id);
+  return code ? rooms.get(code) : null;
 }
 
-function seatOf(socketId) {
-  return players[socketId] ? players[socketId].seat : null;
+function seatOf(room, socketId) {
+  if (room.seats[1] === socketId) return 1;
+  if (room.seats[2] === socketId) return 2;
+  return null;
+}
+
+function joinRoom(socket, room, seat) {
+  room.seats[seat] = socket.id;
+  socketRoom.set(socket.id, room.code);
+  socket.join(room.code);
+}
+
+function broadcastState(room) {
+  io.to(room.code).emit('state_update', room.state);
+}
+
+function emitPlayerList(room) {
+  io.to(room.code).emit('player_list', [1, 2].filter(s => room.seats[s]));
+}
+
+// Send 'welcome' to every seated player who has not yet entered the game.
+// Players who were already in the game are told that an opponent has (re)joined.
+function enterGame(room) {
+  for (const seat of [1, 2]) {
+    const id = room.seats[seat];
+    if (!id) continue;
+    if (!room.entered[id]) {
+      io.to(id).emit('welcome', {
+        seat,
+        state: room.state,
+        code: room.isPrivate ? room.code : null
+      });
+      room.entered[id] = true;
+    } else {
+      io.to(id).emit('opponent_joined');
+    }
+  }
+  emitPlayerList(room);
+}
+
+// Remove a socket from its room (disconnect, or cancelling a private game).
+function leaveRoom(socket) {
+  const room = roomOf(socket);
+  socketRoom.delete(socket.id);
+  if (waitingStranger === socket.id) waitingStranger = null;
+  if (!room) return;
+  const seat = seatOf(room, socket.id);
+  if (seat) room.seats[seat] = null;
+  delete room.entered[socket.id];
+  socket.leave(room.code);
+  if (!room.seats[1] && !room.seats[2]) {
+    rooms.delete(room.code);
+    console.log(`room ${room.code} closed; rooms now ${rooms.size}`);
+  } else {
+    io.to(room.code).emit('opponent_left', { seat });
+    emitPlayerList(room);
+  }
+}
+
+// "HEX-4827", "hex 4827", "4827" -> "HEX-4827";  anything else -> null
+function normalizeCode(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  return digits.length === 4 ? 'HEX-' + digits : null;
+}
+
+function isInt(x, lo, hi) {
+  return Number.isInteger(x) && x >= lo && x <= hi;
 }
 
 // ── Connection handling ──────────────────────────────────────────────────────
@@ -129,24 +208,89 @@ function seatOf(socketId) {
 io.on('connection', (socket) => {
   console.log('connect', socket.id);
 
-  // Assign a seat if one is free, otherwise spectator
-  const taken = connectedSeats();
-  let seat = null;
-  if (!taken.includes(1))      seat = 1;
-  else if (!taken.includes(2)) seat = 2;
-  players[socket.id] = { seat };
+  // A malformed message from any client must never crash the server for everyone.
+  function on(eventName, handler) {
+    socket.on(eventName, (...args) => {
+      try { handler(...args); }
+      catch (err) { console.error('error in', eventName, err); }
+    });
+  }
 
-  // Send the full current state immediately so the new client can sync
-  socket.emit('welcome', { seat, state });
-  console.log(`  assigned seat ${seat ?? 'spectator'}`);
+  // ── Lobby ───────────────────────────────────────────────────────────────
+
+  on('find_match', () => {
+    if (roomOf(socket)) return;
+    // Drop a stale waiter (disconnected, or already placed in a room).
+    if (waitingStranger &&
+        (!io.sockets.sockets.get(waitingStranger) || socketRoom.has(waitingStranger))) {
+      waitingStranger = null;
+    }
+    if (waitingStranger && waitingStranger !== socket.id) {
+      const waiter = io.sockets.sockets.get(waitingStranger);
+      waitingStranger = null;
+      const room = makeRoom(false);
+      joinRoom(waiter, room, 1);
+      joinRoom(socket, room, 2);
+      enterGame(room);
+    } else {
+      waitingStranger = socket.id;
+      socket.emit('lobby_waiting', { kind: 'stranger' });
+    }
+  });
+
+  on('create_private', () => {
+    const existing = roomOf(socket);
+    if (existing) {
+      // Already created one and still waiting: just show the code again.
+      if (!existing.entered[socket.id])
+        socket.emit('lobby_waiting', { kind: 'private', code: existing.code });
+      return;
+    }
+    if (waitingStranger === socket.id) waitingStranger = null;
+    const room = makeRoom(true);
+    joinRoom(socket, room, 1);
+    socket.emit('lobby_waiting', { kind: 'private', code: room.code });
+  });
+
+  on('join_private', ({ code } = {}) => {
+    if (roomOf(socket)) return;
+    const normalized = normalizeCode(code);
+    const room = normalized ? rooms.get(normalized) : null;
+    if (!room || !room.isPrivate) {
+      socket.emit('join_failed', {
+        message: 'No private game was found with that code. ' +
+                 'Check the code, and ask your opponent to confirm that they are still waiting.'
+      });
+      return;
+    }
+    const seat = !room.seats[1] ? 1 : (!room.seats[2] ? 2 : null);
+    if (seat === null) {
+      socket.emit('join_failed', { message: 'That game already has two players.' });
+      return;
+    }
+    if (waitingStranger === socket.id) waitingStranger = null;
+    joinRoom(socket, room, seat);
+    enterGame(room);
+  });
+
+  on('cancel_wait', () => {
+    if (waitingStranger === socket.id) waitingStranger = null;
+    const room = roomOf(socket);
+    // Only a private-game creator who is still alone may cancel; players already
+    // in a game cannot leave through this event.
+    if (room && !room.entered[socket.id]) leaveRoom(socket);
+    socket.emit('lobby_cancelled');
+  });
 
   // ── Move ────────────────────────────────────────────────────────────────
   // Payload: { level, k }
-  socket.on('move', ({ level, k }) => {
-    const seat = seatOf(socket.id);
-    if (seat === null) return;                         // spectator
+  on('move', ({ level, k } = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    const seat = seatOf(room, socket.id);
+    if (seat === null) return;
     if (state.winning_player > 0) return;             // game over
-    if (state.moves === 0 && state.actual_levels < 2) return;
+    if (!isInt(level, 0, state.actual_levels - 1) || !isInt(k, 0, 18)) return;
 
     const i = 19 * level + k;
     if (state.sphere_colors[i] !== 0) return;         // already occupied
@@ -158,7 +302,6 @@ io.on('connection', (socket) => {
 
     // Place the piece — bond colours are computed client-side from sphere_colors,
     // so we only need to keep sphere_colors and cylinder_colors in sync here.
-    // The client sends the resulting cylinder_colors delta along with the move.
     state.sphere_colors[i] = state.player;
 
     if (state.player === 1) {
@@ -176,43 +319,54 @@ io.on('connection', (socket) => {
     }
 
     state.moves += 1;
-    state.undo_seat = seatOf(socket.id);
-    broadcastState('state_update', state);
+    state.undo_seat = seat;
+    broadcastState(room);
   });
 
   // ── Cylinder colours delta ───────────────────────────────────────────────
   // After a move the client that made it sends back the updated cylinder_colors
   // (it already ran set_bond_colors locally).  We store it and relay to the other.
-  socket.on('cylinder_delta', (cylinder_colors) => {
-    state.cylinder_colors = cylinder_colors;
-    socket.broadcast.emit('cylinder_delta', cylinder_colors);
+  on('cylinder_delta', (cylinder_colors) => {
+    const room = roomOf(socket); if (!room) return;
+    if (!Array.isArray(cylinder_colors) || cylinder_colors.length > MAX_CYLINDERS) return;
+    room.state.cylinder_colors = cylinder_colors;
+    socket.to(room.code).emit('cylinder_delta', cylinder_colors);
   });
 
   // ── Win report ───────────────────────────────────────────────────────────
-  socket.on('win', ({ winning_player }) => {
+  on('win', ({ winning_player } = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    if (seatOf(room, socket.id) === null) return;
+    if (winning_player !== 1 && winning_player !== 2) return;
     if (state.winning_player > 0) return;  // already declared
     state.winning_player = winning_player;
     appendGameResult(state, winning_player);
-    io.emit('win_declared', { winning_player });
+    io.to(room.code).emit('win_declared', { winning_player });
   });
 
   // ── Concede ───────────────────────────────────────────────────────────────
   // A player presses Delete to concede; the other player wins.
-  socket.on('concede', () => {
-    const seat = seatOf(socket.id);
+  on('concede', () => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    const seat = seatOf(room, socket.id);
     if (seat === null || state.winning_player > 0 || state.moves === 0) return;
     const winner = seat === 1 ? 2 : 1;  // other player wins
     state.winning_player = winner;
     appendGameResult(state, winner);
-    io.emit('win_declared', { winning_player: winner, conceded: true, conceding_seat: seat });
+    io.to(room.code).emit('win_declared',
+      { winning_player: winner, conceded: true, conceding_seat: seat });
   });
 
   // ── Undo ────────────────────────────────────────────────────────────────
-  // Payload: { expected_moves } — the move count the client thinks is current.
-  // If it doesn't match state.moves, the other player has moved in the meantime
-  // (race condition) and the undo is rejected with a 'undo_rejected' event.
-  socket.on('undo', ({ expected_moves, target_level, target_k, undoing_seat }) => {
-    const seat = seatOf(socket.id);
+  // Payload: { expected_moves, target_level, target_k, undoing_seat }
+  // If expected_moves doesn't match state.moves, the other player has moved in the
+  // meantime (race condition) and the undo is rejected with 'undo_rejected'.
+  on('undo', ({ expected_moves, target_level, target_k, undoing_seat } = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    const seat = seatOf(room, socket.id);
     if (seat === null) return;
 
     // Allow undo if:
@@ -232,8 +386,8 @@ io.on('connection', (socket) => {
     // otherwise fall back to move_active_level/k
     const ul = (target_level !== undefined) ? target_level : state.move_active_level;
     const uk = (target_k    !== undefined) ? target_k    : state.move_active_k;
-    const i  = 19 * ul + uk;
-    state.sphere_colors[i] = 0;
+    if (!isInt(ul, 0, state.actual_levels - 1) || !isInt(uk, 0, 18)) return;
+    state.sphere_colors[19 * ul + uk] = 0;
 
     // Determine who made this move: use undoing_seat from client if provided.
     // This avoids the bug where (3 - state.player) gives the wrong mover
@@ -255,90 +409,123 @@ io.on('connection', (socket) => {
     state.undo_calls  = 1;
     state.undo_seat   = seat; // undo stays with undoing player
     state.moves       = Math.max(0, state.moves - 1);
-    broadcastState('state_update', state);
+    broadcastState(room);
   });
 
   // ── Reset (new game) ─────────────────────────────────────────────────────
-  socket.on('reset', ({ saved_first_player }) => {
-    // makeDefaultState() clears everything including pending_random, red_bidder,
-    // random_sites, moves, sphere_colors — a fully clean slate.
-    state                    = makeDefaultState();
-    state.player             = saved_first_player;
-    state.saved_first_player = saved_first_player;
-    state.red_moves          = Math.floor(state.redturns);
-    // random_sites is 0 in default state — client uses this to detect a true reset
-    broadcastState('state_update', state);
+  // A fresh game state, but the initial SETTINGS carry over: number of layers,
+  // red placements per turn, and the two-player space-bar requirement.
+  on('reset', ({ saved_first_player } = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    if (seatOf(room, socket.id) === null) return;
+    const prev = room.state;
+    const next = makeDefaultState();
+    next.actual_levels = prev.actual_levels;
+    next.redturns      = prev.redturns;
+    next.require_space = prev.require_space;
+    const first = (saved_first_player === 1 || saved_first_player === 2)
+                  ? saved_first_player : prev.saved_first_player;
+    next.player             = first;
+    next.saved_first_player = first;
+    next.red_moves          = Math.floor(next.redturns);
+    room.state = next;
+    broadcastState(room);
   });
 
   // ── Setup changes (before first move) ───────────────────────────────────
-  // Payload: { actual_levels } or { redturns } or { add_random: { level, k } }
-  socket.on('setup', (changes) => {
+  // Payload: { actual_levels } or { redturns } or { add_random: { level, k } } ...
+  on('setup', (changes = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    const seat = seatOf(room, socket.id);
+    if (seat === null) return;
     if (state.moves > 0) return;   // ignore if game started
+
     if (changes.actual_levels !== undefined) {
-      state.actual_levels = changes.actual_levels;
+      if (isInt(changes.actual_levels, 2, MAX_LEVELS))
+        state.actual_levels = changes.actual_levels;
     }
     if (changes.redturns !== undefined) {
-      state.redturns  = changes.redturns;
-      // Start with floor(redturns) so first red turn gives floor placements,
-      // not ceil. The fractional part accumulates across turns as designed.
-      state.red_moves = Math.floor(state.redturns);
+      if (typeof changes.redturns === 'number' && isFinite(changes.redturns) &&
+          changes.redturns >= 1 && changes.redturns <= 100) {
+        state.redturns  = changes.redturns;
+        // Start with floor(redturns) so the first red turn gives floor placements,
+        // not ceil. The fractional part accumulates across turns as designed.
+        state.red_moves = Math.floor(state.redturns);
+      }
     }
     if (changes.add_random !== undefined) {
-      const { level, k } = changes.add_random;
-      const i = 19 * level + k;
-      state.sphere_colors[i] = 1;   // always red, regardless of whose turn it is
-      state.random_sites += 1;
-      // Store level/k so the receiving client can call set_bond_colors directly
-      state.move_active_level = level;
-      state.move_active_k     = k;
+      const { level, k } = changes.add_random || {};
+      if (isInt(level, 0, state.actual_levels - 1) && isInt(k, 0, 18) &&
+          state.sphere_colors[19 * level + k] === 0) {
+        state.sphere_colors[19 * level + k] = 1;   // always red, regardless of whose turn it is
+        state.random_sites += 1;
+        // Store level/k so the receiving client can call set_bond_colors directly
+        state.move_active_level = level;
+        state.move_active_k     = k;
+      }
     }
     if (changes.first_player !== undefined) {
-      state.player             = changes.first_player;
-      state.saved_first_player = changes.first_player;
+      if (changes.first_player === 1 || changes.first_player === 2) {
+        state.player             = changes.first_player;
+        state.saved_first_player = changes.first_player;
+      }
     }
     if (changes.require_space !== undefined) {
-      state.require_space = changes.require_space;
+      state.require_space = changes.require_space ? 1 : 0;
     }
-    // bid_red: first player to press 'm' becomes red (player 1 / seat 1).
-    // Only accepted before any moves or random sites have been placed.
-    if (changes.bid_red !== undefined && state.moves === 0) {  // allowed even after random sites
+
+    // bid_red: the first player to press 'm' becomes red (seat 1).
+    // Allowed even after random sites have been added; closed by the first move.
+    if (changes.bid_red !== undefined) {
       if (!state.red_bidder) {
-        state.red_bidder = changes.bid_red; // seat of the winning bidder
-        // Swap seats so the bidder becomes seat 1 (red) and the other becomes seat 2 (green).
-        // We tell each client their new seat via a 'seat_change' event.
-        const biddingSeat = changes.bid_red;
-        io.emit('seat_change', { red_seat: biddingSeat });
-        // Also update first player to match
+        state.red_bidder = seat;
+        // If the bidder holds seat 2, swap the two seats so the bidder becomes
+        // seat 1 (red).  The clients make the same swap on 'seat_change'; the server
+        // must do it too, so that it keeps agreeing with the clients about who is who.
+        if (seat === 2) {
+          const t = room.seats[1];
+          room.seats[1] = room.seats[2];
+          room.seats[2] = t;
+        }
+        io.to(room.code).emit('seat_change', { red_seat: seat });
         state.saved_first_player = 1;
         state.player = 1;
-        broadcastState('state_update', state);
+        broadcastState(room);
       } else {
         // Someone already bid — inform this client
         socket.emit('bid_rejected', { message: 'Red has already been claimed.' });
       }
       return;
     }
-    broadcastState('state_update', state);
+    broadcastState(room);
   });
 
   // ── Cursor position relay ────────────────────────────────────────────────
-  // Relay active player's cursor position to the other client only.
+  // Relay the active player's cursor position to the other player in the room only.
   // No state stored — purely a display hint.
-  socket.on('cursor', (data) => {
-    socket.broadcast.emit('cursor', data);
+  on('cursor', (data) => {
+    const room = roomOf(socket); if (!room) return;
+    if (!data || !isInt(data.level, 0, MAX_LEVELS - 1) || !isInt(data.k, 0, 18)) return;
+    socket.to(room.code).emit('cursor', { level: data.level, k: data.k });
   });
 
   // ── Chat ──────────────────────────────────────────────────────────────────
-  socket.on('chat', ({ msg }) => {
-    const seat = seatOf(socket.id);
-    const who = seat === 1 ? 'Red' : seat === 2 ? 'Green' : 'Spectator';
-    // Relay to all clients (including sender so they see their own message)
-    io.emit('chat', { who, msg: String(msg).slice(0, 300) });
+  on('chat', ({ msg } = {}) => {
+    const room = roomOf(socket); if (!room) return;
+    const seat = seatOf(room, socket.id);
+    if (seat === null) return;
+    const who = seat === 1 ? 'Red' : 'Green';
+    // Relay to everyone in this room (including sender so they see their own message)
+    io.to(room.code).emit('chat', { who, msg: String(msg).slice(0, 300) });
   });
 
   // ── Space pressed (two-player random site confirmation) ─────────────────────
-  socket.on('space_pressed', ({ seat }) => {
-    if (state.moves > 0) return;
+  on('space_pressed', () => {
+    const room = roomOf(socket); if (!room) return;
+    const state = room.state;
+    const seat = seatOf(room, socket.id);
+    if (seat === null || state.moves > 0) return;
 
     if (!state.pending_random) {
       // First press: pick a random unoccupied site now so both clients use the same one
@@ -350,41 +537,37 @@ io.on('connection', (socket) => {
       } while (state.sphere_colors[19 * level + k] !== 0 && attempts < 10000);
 
       state.pending_random = { seat, level, k };
-      // Notify both clients — the requesting player gets the wait message (client-side),
-      // the other player gets the popup via 'pending_random' event
-      io.emit('pending_random', { requesting_seat: seat });
+      // Tell both clients — the requester shows a wait message, the other a confirm prompt
+      io.to(room.code).emit('pending_random', { requesting_seat: seat });
 
     } else if (state.pending_random.seat !== seat) {
       // Confirmation from the other player
       const { level, k } = state.pending_random;
       state.pending_random = null;
-      const i = 19 * level + k;
-      state.sphere_colors[i]  = 1;
+      state.sphere_colors[19 * level + k] = 1;
       state.random_sites      += 1;
       state.move_active_level  = level;
       state.move_active_k      = k;
-      broadcastState('state_update', state);
+      broadcastState(room);
 
     } else {
       // Same player presses again — cancel
       state.pending_random = null;
-      io.emit('random_cancelled');
+      io.to(room.code).emit('random_cancelled');
     }
   });
 
   // ── Disconnect ───────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
-    console.log('disconnect', socket.id, 'seat', players[socket.id]?.seat);
-    delete players[socket.id];
-    io.emit('player_list', connectedSeats());
+    console.log('disconnect', socket.id);
+    leaveRoom(socket);
+    if (waitingStranger === socket.id) waitingStranger = null;
   });
-
-  io.emit('player_list', connectedSeats());
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`3D Hex server listening on http://localhost:${PORT}`);
-  console.log('Open that URL in two browser windows to play.');
+  console.log('Open that URL in two browser windows; use the lobby to start or join a game.');
 });
