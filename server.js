@@ -79,6 +79,7 @@ app.get('/statistics.csv', (req, res) => {
 // This mirrors the variables in the client that both players must agree on.
 
 const DEFAULT_LEVELS   = 9;
+const DEFAULT_REDTURNS = 2.5;   // average red placements per turn at the start of a game
 const MAX_LEVELS       = 20;
 const MAX_SITES        = 19 * MAX_LEVELS;
 const MAX_CYLINDERS    = 7 * 19 * MAX_LEVELS;
@@ -87,12 +88,12 @@ function makeDefaultState() {
   return {
     // game setup (may be changed before first move)
     actual_levels      : DEFAULT_LEVELS,
-    redturns           : 2.5,
+    redturns           : DEFAULT_REDTURNS,
     saved_first_player : 1,
 
     // in-progress state
     player             : 1,
-    red_moves          : 2.5,        // starts at floor(redturns)
+    red_moves          : Math.floor(DEFAULT_REDTURNS),   // first red turn = floor(redturns)
     red_moves_incremented : false,
     moves              : 0,
     random_sites       : 0,

@@ -661,7 +661,7 @@ var nlevels = 20, waiting_for_confirmation = 0;
 var saved_first_player = 1;
 var actual_levels = 9;
 var winning_player = 0; red_wins = 0; green_wins = 0, random_sites = 0;
-var redturns = 2, trianglefac = 1, red_moves = redturns, d1, d2, first_add;
+var redturns = 2.5, trianglefac = 1, red_moves = Math.floor(redturns), d1, d2, first_add;
 var jstart = 0, jend = 7;
 var ntheta = 17, nphi = 33;
 var ncyl_phi = 9;
@@ -2137,19 +2137,19 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
            nf.innerHTML = "game has already started so cylinder length cannot be changed";
       break;
     case 219: // '['
-      currentAngle[0] += 1/;
+      currentAngle[0] += 1;
       break;
     case 221: // ']'
-      currentAngle[0] -= 1.;
+      currentAngle[0] -= 1;
       break;
     case 222: // '"'
       bond_lines = 1 - bond_lines;
       break; 
     case 188: // ',' or '<'
-      currentAngle[1] -= 1.;
+      currentAngle[1] -= 1;
       break;
     case 190: // '.' or '>'
-      currentAngle[1] += 1.;
+      currentAngle[1] += 1;
       break; 
     case 97: // numpad 1
     case 49: // '1'
