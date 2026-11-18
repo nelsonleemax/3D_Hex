@@ -87,12 +87,12 @@ function makeDefaultState() {
   return {
     // game setup (may be changed before first move)
     actual_levels      : DEFAULT_LEVELS,
-    redturns           : 2,
+    redturns           : 2.5,
     saved_first_player : 1,
 
     // in-progress state
     player             : 1,
-    red_moves          : 2,        // starts at floor(redturns)
+    red_moves          : 2.5,        // starts at floor(redturns)
     red_moves_incremented : false,
     moves              : 0,
     random_sites       : 0,
