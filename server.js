@@ -33,13 +33,21 @@ try {
   try { fs.writeFileSync(CSV_PATH, csvData); } catch (e2) {}
 }
 
-function appendGameResult(state, winner) {
+// ── Who won: two numbering systems ───────────────────────────────────────────
+// INSIDE the game (state.winning_player, the 'win' and 'win_declared' messages, and
+// the client's own win test) the numbering is:  1 = GREEN won,  2 = RED won.
+// The STATISTICS FILE uses the numbering you specified:  1 = red won,  2 = green won.
+// Convert only here, when writing the file.
+const GREEN_WON = 1, RED_WON = 2;
+function csvWinnerCode(winningPlayer) { return winningPlayer === RED_WON ? 1 : 2; }
+
+function appendGameResult(state, winningPlayer) {
   const row = [
-    state.saved_first_player,
+    state.saved_first_player,          // 1 = red moved first, 2 = green moved first
     state.redturns.toFixed(4),
     state.random_sites,
     state.actual_levels,
-    winner
+    csvWinnerCode(winningPlayer)       // 1 = red won, 2 = green won
   ].join(',') + '\n';
   csvData += row;
   try { fs.writeFileSync(CSV_PATH, csvData); } catch (e) {}
@@ -352,11 +360,13 @@ io.on('connection', (socket) => {
     const state = room.state;
     const seat = seatOf(room, socket.id);
     if (seat === null || state.winning_player > 0 || state.moves === 0) return;
-    const winner = seat === 1 ? 2 : 1;  // other player wins
-    state.winning_player = winner;
-    appendGameResult(state, winner);
+    // Seat 1 is red and seat 2 is green.  The player who concedes loses, so the
+    // OTHER side wins.  (In the game's numbering: red conceding means GREEN_WON.)
+    const winning = (seat === 1) ? GREEN_WON : RED_WON;
+    state.winning_player = winning;
+    appendGameResult(state, winning);
     io.to(room.code).emit('win_declared',
-      { winning_player: winner, conceded: true, conceding_seat: seat });
+      { winning_player: winning, conceded: true, conceding_seat: seat });
   });
 
   // ── Undo ────────────────────────────────────────────────────────────────
