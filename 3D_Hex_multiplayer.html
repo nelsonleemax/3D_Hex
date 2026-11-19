@@ -1132,6 +1132,7 @@ function main() {
   initSocket();
 
   var tick = function() {   // Start drawing
+    stepRotation();           // advance any keyboard-started rotation by one degree
     if (moved && !mouse_down)
 	 	moved = 0;
     if (global_debug && db_cylinder_calls)
@@ -1747,6 +1748,45 @@ function startFlash() {
   flash_last_move = 1; flash_state = 0;
   flash_interval_id = setInterval(function() { flash_state = 1 - flash_state; }, 500);
 }
+// ── Keyboard rotation animation ──────────────────────────────────────────────
+// Each press of  [  ]  ,  .  starts an animation that turns the board by
+// rotation_per_key_press degrees, ONE degree per displayed frame, and then stops.
+// This lets someone who cannot use the mouse see motion parallax.
+// (Before the first move, the u and i keys change rotation_per_key_press.)
+var rotation_per_key_press = 1;   // degrees turned by one press of [ ] , .
+var rotation_pending = [0, 0];    // signed degrees still to turn: [about currentAngle[0], about currentAngle[1]]
+
+function requestRotation(axis, sign, isRepeat) {
+  var want = sign * rotation_per_key_press;
+  if (!isRepeat) {
+    // A separate key press adds one full turn, so two quick taps turn twice as far.
+    rotation_pending[axis] += want;
+  }
+  else if (rotation_pending[axis] === 0 || Math.sign(rotation_pending[axis]) === sign) {
+    // Key held down (auto-repeat): keep the animation topped up to one full turn so the
+    // rotation is continuous, but never let it pile up -- it stops within
+    // rotation_per_key_press frames of releasing the key.
+    if (Math.abs(rotation_pending[axis]) < rotation_per_key_press)
+      rotation_pending[axis] = want;
+  }
+}
+
+function stepRotation() {         // called once per frame from tick()
+  for (var axis = 0; axis < 2; ++axis) {
+    var p = rotation_pending[axis];
+    if (p !== 0) {
+      var step = Math.sign(p) * Math.min(1, Math.abs(p));   // exactly one degree per frame
+      currentAngle[axis] += step;
+      rotation_pending[axis] = p - step;
+    }
+  }
+}
+
+function report_rotation_per_key_press() {
+  nf.innerHTML = "Rotation per key press is " + rotation_per_key_press +
+                 (rotation_per_key_press === 1 ? " degree" : " degrees");
+}
+
 function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
   if (global_debug) console.log("key code", ev.keyCode);
   mouse_control_key = ev.ctrlKey;
@@ -1860,7 +1900,13 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
        emitCursor();
       	}
       break;
-    case 85: // 'u' move upper left in layer
+    case 85: // 'u': before the first move, increase rotation_per_key_press;
+             //      once the game has started, move upper left in layer
+      if (!(moves > 0)) {
+        rotation_per_key_press += 1;
+        report_rotation_per_key_press();
+        break;
+        }
       if (move[6*active_k+2] >= 0) {
         restore_bond_colors(active_level, active_k);
       	active_k = move[6*active_k+2];
@@ -1871,7 +1917,14 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
        emitCursor();
       	}
       break;
-    case 73: // 'i' move lower right in layer
+    case 73: // 'i': before the first move, decrease rotation_per_key_press (minimum 1);
+             //      once the game has started, move lower right in layer
+      if (!(moves > 0)) {
+        if (rotation_per_key_press > 1)
+          rotation_per_key_press -= 1;
+        report_rotation_per_key_press();
+        break;
+        }
       if (move[6*active_k+5] >= 0) {
         restore_bond_colors(active_level, active_k);
       	active_k = move[6*active_k+5];
@@ -1929,9 +1982,11 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       break;
     case 74: // 'j' reset rotation about cylinder axis to zero
          currentAngle[0] = 0.;
+         rotation_pending[0] = 0;
       break;
     case 75: // 'k' reset rotation about vertical axis to zero
          currentAngle[1] = 0.;
+         rotation_pending[1] = 0;
       break;
     case 76: // 'l' toggle display of white bonds
        suppress_white_bonds = 1 - suppress_white_bonds;
@@ -2137,19 +2192,19 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
            nf.innerHTML = "game has already started so cylinder length cannot be changed";
       break;
     case 219: // '['
-      currentAngle[0] += 1;
+      requestRotation(0, +1, ev.repeat);
       break;
     case 221: // ']'
-      currentAngle[0] -= 1;
+      requestRotation(0, -1, ev.repeat);
       break;
     case 222: // '"'
       bond_lines = 1 - bond_lines;
       break; 
     case 188: // ',' or '<'
-      currentAngle[1] -= 1;
+      requestRotation(1, -1, ev.repeat);
       break;
     case 190: // '.' or '>'
-      currentAngle[1] += 1;
+      requestRotation(1, +1, ev.repeat);
       break; 
     case 97: // numpad 1
     case 49: // '1'
