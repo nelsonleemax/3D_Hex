@@ -27,6 +27,8 @@
       #lobby_code_big { font-size: 34px; letter-spacing: 3px; margin: 10px 0; color: #ff0; text-align: center; }
       #lobby_msg { min-height: 1.4em; color: #fa8; margin: 12px 0 0 0; }
       #lobby a { color: #8cf; }
+      #lobby_docs { margin: 0 0 16px 0; font-size: 14px; line-height: 1.5;
+                    overflow-wrap: anywhere; word-break: break-word; }
     </style>
   </head>
   <body onload="main()">
@@ -70,6 +72,10 @@
     <div id="lobby" role="dialog" aria-modal="true" aria-labelledby="lobby_title">
       <div id="lobby_box">
         <h1 id="lobby_title">3D Hex</h1>
+        <p id="lobby_docs">Before playing, read the user manual at
+          <a href="https://web.cs.ucdavis.edu/~max/3D_Hex_Instructions.pdf" target="_blank" rel="noopener noreferrer">https://web.cs.ucdavis.edu/~max/3D_Hex_Instructions.pdf</a>.
+          Also use the one page keyboard reference
+          <a href="https://web.cs.ucdavis.edu/~max/3D_Hex_Keyboard_Guide.txt" target="_blank" rel="noopener noreferrer">https://web.cs.ucdavis.edu/~max/3D_Hex_Keyboard_Guide.txt</a>.</p>
         <div id="lobby_main">
           <button id="lobby_stranger" onclick="lobbyFindMatch()">Play with a stranger</button>
           <button id="lobby_create" onclick="lobbyCreatePrivate()">Create a private game</button>
@@ -1750,11 +1756,17 @@ function startFlash() {
 }
 // ── Keyboard rotation animation ──────────────────────────────────────────────
 // Each press of  [  ]  ,  .  starts an animation that turns the board by
-// rotation_per_key_press degrees, ONE degree per displayed frame, and then stops.
-// This lets someone who cannot use the mouse see motion parallax.
-// (Before the first move, the u and i keys change rotation_per_key_press.)
-var rotation_per_key_press = 1;   // degrees turned by one press of [ ] , .
-var rotation_pending = [0, 0];    // signed degrees still to turn: [about currentAngle[0], about currentAngle[1]]
+// rotation_per_key_press degrees, rotation_step degrees per displayed frame, and then
+// stops.  This lets someone who cannot use the mouse see motion parallax.
+// The End and Home keys increase / decrease rotation_per_key_press by rotation_step.
+//
+// rotation_step is the one number to change to make the rotation faster or slower.  It is
+//   * the degrees turned per displayed frame while a rotation key is animating,
+//   * the starting value of rotation_per_key_press, and
+//   * the amount the End / Home keys add to / take from rotation_per_key_press.
+var rotation_step = 0.5;                      // degrees
+var rotation_per_key_press = rotation_step;   // degrees turned by one press of [ ] , .
+var rotation_pending = [0, 0];                // signed degrees still to turn: [about currentAngle[0], about currentAngle[1]]
 
 function requestRotation(axis, sign, isRepeat) {
   var want = sign * rotation_per_key_press;
@@ -1765,7 +1777,7 @@ function requestRotation(axis, sign, isRepeat) {
   else if (rotation_pending[axis] === 0 || Math.sign(rotation_pending[axis]) === sign) {
     // Key held down (auto-repeat): keep the animation topped up to one full turn so the
     // rotation is continuous, but never let it pile up -- it stops within
-    // rotation_per_key_press frames of releasing the key.
+    // rotation_per_key_press / rotation_step frames of releasing the key.
     if (Math.abs(rotation_pending[axis]) < rotation_per_key_press)
       rotation_pending[axis] = want;
   }
@@ -1774,12 +1786,19 @@ function requestRotation(axis, sign, isRepeat) {
 function stepRotation() {         // called once per frame from tick()
   for (var axis = 0; axis < 2; ++axis) {
     var p = rotation_pending[axis];
-    if (p !== 0) {
-      var step = Math.sign(p) * Math.min(1, Math.abs(p));   // exactly one degree per frame
-      currentAngle[axis] += step;
-      rotation_pending[axis] = p - step;
-    }
+    if (Math.abs(p) < 1e-9) { rotation_pending[axis] = 0; continue; }   // ignore rounding dust
+    var step = Math.sign(p) * Math.min(rotation_step, Math.abs(p));     // rotation_step degrees per frame
+    currentAngle[axis] += step;
+    rotation_pending[axis] = p - step;
   }
+}
+
+// direction: +1 for the End key, -1 for the Home key.  Never goes below one step.
+function change_rotation_per_key_press(direction) {
+  var v = rotation_per_key_press + direction * rotation_step;
+  if (v >= rotation_step - 1e-9)
+    rotation_per_key_press = Math.round(v * 1e6) / 1e6;   // round away floating-point drift
+  report_rotation_per_key_press();
 }
 
 function report_rotation_per_key_press() {
@@ -1900,13 +1919,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
        emitCursor();
       	}
       break;
-    case 85: // 'u': before the first move, increase rotation_per_key_press;
-             //      once the game has started, move upper left in layer
-      if (!(moves > 0)) {
-        rotation_per_key_press += 1;
-        report_rotation_per_key_press();
-        break;
-        }
+    case 85: // 'u' move upper left in layer
       if (move[6*active_k+2] >= 0) {
         restore_bond_colors(active_level, active_k);
       	active_k = move[6*active_k+2];
@@ -1917,14 +1930,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
        emitCursor();
       	}
       break;
-    case 73: // 'i': before the first move, decrease rotation_per_key_press (minimum 1);
-             //      once the game has started, move lower right in layer
-      if (!(moves > 0)) {
-        if (rotation_per_key_press > 1)
-          rotation_per_key_press -= 1;
-        report_rotation_per_key_press();
-        break;
-        }
+    case 73: // 'i' move lower right in layer
       if (move[6*active_k+5] >= 0) {
         restore_bond_colors(active_level, active_k);
       	active_k = move[6*active_k+5];
@@ -2190,6 +2196,14 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
            }
          else
            nf.innerHTML = "game has already started so cylinder length cannot be changed";
+      break;
+    case 35: // End key: increase rotation_per_key_press by rotation_step
+      ev.preventDefault();
+      change_rotation_per_key_press(+1);
+      break;
+    case 36: // Home key: decrease rotation_per_key_press by rotation_step (minimum one step)
+      ev.preventDefault();
+      change_rotation_per_key_press(-1);
       break;
     case 219: // '['
       requestRotation(0, +1, ev.repeat);
