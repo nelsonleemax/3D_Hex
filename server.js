@@ -19,15 +19,20 @@ const fs      = require('fs');
 // ── CSV statistics ────────────────────────────────────────────────────────────
 // Written to disk (persists within a Render session; lost on redeploy unless
 // a persistent disk is mounted at /data). Also served at GET /statistics.csv.
-// Fields: first_player, red_turns_per_move, random_sites, actual_levels, winner
+// Fields: first_player, red_turns_per_move, random_sites, actual_levels, winner, date (mm/dd/yyyy)
 // One file for all rooms: every completed game from every room is one row.
-const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'statistics.csv');
-const CSV_HEADER = 'first_player,red_turns_per_move,random_sites,actual_levels,winner\n';
+const CSV_PATH = process.env.CSV_PATH || path.join(__dirname, 'statistics_with_date.csv');
+const CSV_HEADER = 'first_player,red_turns_per_move,random_sites,actual_levels,winner,date\n';
 
 let csvData = '';
 try {
   csvData = fs.readFileSync(CSV_PATH, 'utf8');
-  if (!csvData.startsWith('first_player')) csvData = CSV_HEADER + csvData;
+  if (!csvData.startsWith('first_player')) {
+    csvData = CSV_HEADER + csvData;
+  } else if (!/^[^\n]*,date\s*\n/.test(csvData)) {
+    // header from an older version of the file: add the extra column heading
+    csvData = csvData.replace(/^[^\n]*\n/, CSV_HEADER);
+  }
 } catch (e) {
   csvData = CSV_HEADER;
   try { fs.writeFileSync(CSV_PATH, csvData); } catch (e2) {}
@@ -41,13 +46,23 @@ try {
 const GREEN_WON = 1, RED_WON = 2;
 function csvWinnerCode(winningPlayer) { return winningPlayer === RED_WON ? 1 : 2; }
 
+// Today's date as mm/dd/yyyy, in Pacific time (the server itself runs on UTC).
+function csvDate() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  const get = t => parts.find(p => p.type === t).value;
+  return get('month') + '/' + get('day') + '/' + get('year');
+}
+
 function appendGameResult(state, winningPlayer) {
   const row = [
     state.saved_first_player,          // 1 = red moved first, 2 = green moved first
     state.redturns.toFixed(4),
     state.random_sites,
     state.actual_levels,
-    csvWinnerCode(winningPlayer)       // 1 = red won, 2 = green won
+    csvWinnerCode(winningPlayer),      // 1 = red won, 2 = green won
+    csvDate()                          // mm/dd/yyyy
   ].join(',') + '\n';
   csvData += row;
   try { fs.writeFileSync(CSV_PATH, csvData); } catch (e) {}
@@ -69,11 +84,13 @@ app.get('/', (req, res) => {
 });
 
 // Download statistics
-app.get('/statistics.csv', (req, res) => {
+function sendStats(req, res) {
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="statistics.csv"');
+  res.setHeader('Content-Disposition', 'attachment; filename="statistics_with_date.csv"');
   res.send(csvData);
-});
+}
+app.get('/statistics_with_date.csv', sendStats);
+app.get('/statistics.csv', sendStats);   // old address still works
 
 // ── Game state (one per room) ────────────────────────────────────────────────
 // This mirrors the variables in the client that both players must agree on.
@@ -131,6 +148,7 @@ function makeRoom(isPrivate) {
     code, isPrivate,
     state: makeDefaultState(),
     seats: { 1: null, 2: null },
+    spectators: new Set(),     // socket ids of people only watching
     entered: {}
   };
   rooms.set(code, room);
@@ -189,11 +207,16 @@ function leaveRoom(socket) {
   socketRoom.delete(socket.id);
   if (waitingStranger === socket.id) waitingStranger = null;
   if (!room) return;
+  socket.leave(room.code);
+  if (room.spectators.delete(socket.id)) return;   // a spectator leaving changes nothing for the players
   const seat = seatOf(room, socket.id);
   if (seat) room.seats[seat] = null;
   delete room.entered[socket.id];
-  socket.leave(room.code);
   if (!room.seats[1] && !room.seats[2]) {
+    for (const sid of room.spectators) {
+      socketRoom.delete(sid);
+      io.to(sid).emit('spectate_ended');
+    }
     rooms.delete(room.code);
     console.log(`room ${room.code} closed; rooms now ${rooms.size}`);
   } else {
@@ -274,7 +297,14 @@ io.on('connection', (socket) => {
     }
     const seat = !room.seats[1] ? 1 : (!room.seats[2] ? 2 : null);
     if (seat === null) {
-      socket.emit('join_failed', { message: 'That game already has two players.' });
+      // Both seats are taken: join as a spectator (can watch, cannot play or chat).
+      if (waitingStranger === socket.id) waitingStranger = null;
+      room.spectators.add(socket.id);
+      socketRoom.set(socket.id, room.code);
+      socket.join(room.code);
+      socket.emit('welcome', { seat: null, state: room.state, code: room.code });
+      socket.emit('player_list', [1, 2].filter(x => room.seats[x]));
+      console.log(`spectator joined ${room.code}; spectators now ${room.spectators.size}`);
       return;
     }
     if (waitingStranger === socket.id) waitingStranger = null;
@@ -337,6 +367,7 @@ io.on('connection', (socket) => {
   // (it already ran set_bond_colors locally).  We store it and relay to the other.
   on('cylinder_delta', (cylinder_colors) => {
     const room = roomOf(socket); if (!room) return;
+    if (seatOf(room, socket.id) === null) return;   // spectators may not change the board
     if (!Array.isArray(cylinder_colors) || cylinder_colors.length > MAX_CYLINDERS) return;
     room.state.cylinder_colors = cylinder_colors;
     socket.to(room.code).emit('cylinder_delta', cylinder_colors);

@@ -482,7 +482,7 @@ function initSocket() {
     lobbyHide();
     if (my_seat === 1)      updateSeatBanner('You are RED  (seat 1)');
     else if (my_seat === 2) updateSeatBanner('You are GREEN (seat 2)');
-    else                    updateSeatBanner('Spectator');
+    else                    updateSeatBanner('SPECTATOR — you can watch but not play');
     applyServerState(data.state);
     refocusCanvas();
   });
@@ -512,17 +512,21 @@ function initSocket() {
         nf.innerHTML = prefix + "Green 1D player wins. Red wins " + red_wins +
                        ", green wins " + green_wins +
                        ". Press Enter key to start over with current settings.";
-        alert(prefix + 'Green 1D player wins. Press Enter key to start over with current settings.');
-        mouse_down = 0; dragging = false;
-        refocusCanvas();
+        if (my_seat !== null) {
+          alert(prefix + 'Green 1D player wins. Press Enter key to start over with current settings.');
+          mouse_down = 0; dragging = false;
+          refocusCanvas();
+        }
       } else {
         ++red_wins;
         nf.innerHTML = prefix + "Red 2D player wins. Red wins " + red_wins +
                        ", green wins " + green_wins +
                        ". Press Enter key to start over with current settings.";
-        alert(prefix + 'Red 2D player wins. Press Enter key to start over with current settings.');
-        mouse_down = 0; dragging = false;
-        refocusCanvas();
+        if (my_seat !== null) {
+          alert(prefix + 'Red 2D player wins. Press Enter key to start over with current settings.');
+          mouse_down = 0; dragging = false;
+          refocusCanvas();
+        }
       }
     }, 0);
   });
@@ -545,6 +549,7 @@ function initSocket() {
 
   // seat_change: server tells clients who won the red bid and who is now green.
   socket.on('seat_change', function(data) {
+    if (my_seat === null) return;   // spectators keep watching; nothing to change
     my_seat = (my_seat === data.red_seat) ? 1 : 2;
     if (my_seat === 1) {
       updateSeatBanner('You are RED  (seat 1) — won red bid');
@@ -575,7 +580,9 @@ function initSocket() {
   // pending_random: server broadcasts this to BOTH clients when one presses space.
   // The requesting player sees a waiting message; the other gets a popup.
   socket.on('pending_random', function(data) {
-    if (my_seat === data.requesting_seat) {
+    if (my_seat === null) {
+      nf.innerHTML = 'Player ' + data.requesting_seat + ' asked to add a random red position; waiting for the other player to confirm.';
+    } else if (my_seat === data.requesting_seat) {
       // I am the requester — show waiting message
       nf.innerHTML = 'Waiting for player ' + (my_seat === 1 ? 2 : 1) +
                      ' to confirm a new random red position (press space to cancel).';
@@ -614,7 +621,7 @@ function initSocket() {
     else if (my_seat === 2)
       updateSeatBanner('You are GREEN (seat 2)');
     else
-      updateSeatBanner('Spectator');
+      updateSeatBanner('SPECTATOR — you can watch but not play');
   });
 
   // ── Lobby events ─────────────────────────────────────────────────────────
@@ -637,13 +644,18 @@ function initSocket() {
   });
 
   // ── Opponent arrives / leaves during a game ──────────────────────────────
-  socket.on('opponent_left', function() {
+  socket.on('opponent_left', function(d) {
     pending_confirmation = false;
+    if (my_seat === null) { notifyInfo('A player has left the game.'); return; }
     notifyInfo(room_code
       ? 'Your opponent has left the game. If they return with code ' + room_code + ' you can continue.'
       : 'Your opponent has left the game. Reload this page to find a new opponent.');
   });
+  socket.on('spectate_ended', function() {
+    notifyInfo('Both players have left, so this game has ended. Reload the page to start or join another game.');
+  });
   socket.on('opponent_joined', function() {
+    if (my_seat === null) { notifyInfo('A player has joined the game.'); return; }
     notifyInfo('Your opponent has joined the game.');
   });
 
@@ -1806,8 +1818,15 @@ function report_rotation_per_key_press() {
                  (rotation_per_key_press === 1 ? " degree" : " degrees");
 }
 
+var SPECTATOR_BLOCKED_KEYS = [8, 13, 32, 33, 34, 46, 51, 52, 53, 77, 99, 100, 101];
 function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
   if (global_debug) console.log("key code", ev.keyCode);
+  // A spectator may rotate, zoom and move the cursor, but cannot change the game.
+  if (socket && my_seat === null &&
+      (SPECTATOR_BLOCKED_KEYS.indexOf(ev.keyCode) >= 0 || (ev.keyCode === 90 && ev.ctrlKey))) {
+    nf.innerHTML = "Spectators can watch but cannot change the game.";
+    return;
+  }
   mouse_control_key = ev.ctrlKey;
   switch (ev.keyCode) {
       case 38: // Up arrow key -> translate right
