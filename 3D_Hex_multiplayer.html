@@ -7,7 +7,11 @@
       body { margin: 0; padding: 0; overflow: hidden; }
       canvas { display: block; }
       pre { display: inline; }
-      #Parameters { font-size: 14px; font-family: monospace; margin: 8px 0; padding: 0; display: block; }
+      #Parameters { font-size: 14px; font-family: monospace; margin: 8px 0; padding: 0 330px 0 0; display: block; }
+      #text_line { position: relative; }
+      /* position report: right-aligned on the text feedback line, separate from the messages */
+      #pos_report { position: absolute; top: 8px; right: 8px; font-size: 14px; font-family: monospace;
+                    font-weight: bold; text-align: right; white-space: nowrap; }
       /* ---- lobby overlay ---- */
       #lobby { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 100000;
                background: rgba(14,16,20,0.94); color: #eee; font-family: monospace; font-size: 16px;
@@ -33,7 +37,7 @@
   </head>
   <body onload="main()">
     <canvas id="webgl"></canvas>
-    <pre><p id="Parameters"></p></pre>
+    <div id="text_line"><pre><p id="Parameters"></p></pre><span id="pos_report"></span></div>
     <p id="which curve"></p>
     <p id="seat_banner" style="
          position:fixed; top:0; right:10px;
@@ -1150,6 +1154,7 @@ function main() {
   initSocket();
 
   var tick = function() {   // Start drawing
+    reportPosition();
     stepRotation();           // advance any keyboard-started rotation by one degree
     if (moved && !mouse_down)
 	 	moved = 0;
@@ -1792,6 +1797,26 @@ function requestRotation(axis, sign, isRepeat) {
     // rotation_per_key_press / rotation_step frames of releasing the key.
     if (Math.abs(rotation_pending[axis]) < rotation_per_key_press)
       rotation_pending[axis] = want;
+  }
+}
+
+// Text report at the right end of the feedback line, for readers (such as software
+// agents) who cannot infer the position from the picture.
+var rep_moves = -1, rep_tl = -1, rep_tk = -1;
+function reportPosition() {
+  var el = document.getElementById('pos_report');
+  if (!el) return;
+  if (moves !== rep_moves) {
+    if (moves === 0)
+      el.textContent = '';
+    else if (moves > rep_moves && rep_moves >= 0)
+      el.textContent = 'confirmed move level ' + move_active_level + ', k ' + move_active_k;
+    else if (moves < rep_moves)
+      el.textContent = 'tentative level ' + t_active_level + ', k ' + t_active_k;
+    rep_moves = moves; rep_tl = t_active_level; rep_tk = t_active_k;
+  } else if (t_active_level !== rep_tl || t_active_k !== rep_tk) {
+    el.textContent = 'tentative level ' + t_active_level + ', k ' + t_active_k;
+    rep_tl = t_active_level; rep_tk = t_active_k;
   }
 }
 
