@@ -9,6 +9,13 @@
       pre { display: inline; }
       #Parameters { font-size: 14px; font-family: monospace; margin: 8px 0; padding: 0 620px 0 0; display: block; }
       #text_line { position: relative; }
+      #move_list { display: none; margin: 4px 8px; font-family: monospace; font-size: 18px; line-height: 1.35; white-space: pre; }
+      /* Insert key: text-only mode — no canvas, no chat, only the feedback text */
+      body.text_only canvas { display: none; }
+      body.text_only #chat_panel { display: none; }
+      body.text_only #Parameters { font-size: 20px; }
+      body.text_only #pos_report { font-size: 20px; right: 10px; }
+      body.text_only #move_list { display: block; }
       /* position report: right-aligned on the text feedback line, separate from the messages */
       #pos_report { position: absolute; top: 8px; right: 335px; /* clear of the 320px chat panel */ font-size: 14px; font-family: monospace;
                     font-weight: bold; text-align: right; white-space: nowrap; }
@@ -38,6 +45,7 @@
   <body onload="main()">
     <canvas id="webgl"></canvas>
     <div id="text_line"><pre><p id="Parameters"></p></pre><span id="pos_report"></span></div>
+    <pre id="move_list"></pre>
     <p id="which curve"></p>
     <p id="seat_banner" style="
          position:fixed; top:0; right:10px;
@@ -315,6 +323,13 @@ function applyServerState(s) {
       winning_player = 2;
       if (socket) socket.emit('win', { winning_player: 2 });
     }
+  }
+
+  // When the turn passes to me, my displayed cursor may still show the opponent's last
+  // cursor position: resynchronise it with my real cursor.
+  if (socket && my_seat !== null && player === my_seat && prev_player !== player) {
+    t_active_level = active_level;
+    t_active_k     = active_k;
   }
 
   // Update the status text (if no win)
@@ -626,6 +641,25 @@ function initSocket() {
       updateSeatBanner('You are GREEN (seat 2)');
     else
       updateSeatBanner('SPECTATOR — you can watch but not play');
+  });
+
+  // The server refused my move: drop the stone I drew optimistically and show why.
+  socket.on('move_rejected', function(d) {
+    my_move_in_flight = false;
+    var last = move_history[move_history.length - 1];
+    if (last && last.level === d.level && last.k === d.k) move_history.pop();
+    if (d.state) {
+      applyServerState(d.state);
+    } else {
+      sphere_colors[19*d.level + d.k] = 0;
+      restore_bond_colors(d.level, d.k);
+    }
+    tentative_move_pending = false;
+    if (my_seat !== null && my_seat === player)
+      set_bond_colors(active_level, active_k, my_seat, 1);   // redraw the cursor preview
+    t_active_level = active_level; t_active_k = active_k;
+    nf.innerHTML = d.reason;
+    notifyInfo(d.reason);
   });
 
   // ── Lobby events ─────────────────────────────────────────────────────────
@@ -1152,6 +1186,7 @@ function main() {
 
   // Start multiplayer socket connection
   initSocket();
+  if (new URLSearchParams(location.search).has('text')) setTextOnly(true);   // ?text=1 starts in text-only mode
 
   var tick = function() {   // Start drawing
     reportPosition();
@@ -1184,6 +1219,7 @@ function main() {
             }
          }
        }
+    if (!text_only) {   // text-only mode makes no graphics calls
     // Calculate the view projection matrix
     // Assign to the outer mvpMatrix (no 'var') so onmousedown picking always
     // uses the up-to-date matrix, not the stale one computed at startup.
@@ -1198,6 +1234,7 @@ function main() {
     gl.uniformMatrix4fv(u_ModelMatrix, false, g_modelMatrix.elements);
     gl.uniformMatrix4fv(u_NormalMatrix, false, NormalMatrix.elements);
     draw(gl, mvpMatrix, u_MvpMatrix, u_ModelMatrix, u_NormalMatrix);
+    }
 
     requestAnimationFrame(tick, canvas);
   };
@@ -1802,22 +1839,54 @@ function requestRotation(axis, sign, isRepeat) {
 
 // Text report at the right end of the feedback line, for readers (such as software
 // agents) who cannot infer the position from the picture.
-var rep_moves = -1, rep_tl = -1, rep_tk = -1;
+var rep_moves = -1, rep_tl = -1, rep_tk = -1, rep_player = 1;
+var move_log = [];     // { n, who, level, k } for every confirmed move, oldest first
+var text_only = false;
+function showMoveList() {
+  var el = document.getElementById('move_list');
+  if (!el) return;
+  if (move_log.length === 0) { el.textContent = 'No moves yet.'; return; }
+  var lines = ['Moves (newest first):'];
+  for (var i = move_log.length - 1; i >= 0 && lines.length <= 12; --i) {
+    var m = move_log[i];
+    lines.push('#' + m.n + ' ' + (m.who === 1 ? 'Red  ' : 'Green') + ' level ' + m.level + ', k ' + m.k);
+  }
+  el.textContent = lines.join('\n');
+}
 function reportPosition() {
   var el = document.getElementById('pos_report');
   if (!el) return;
   if (moves !== rep_moves) {
-    if (moves === 0)
+    if (moves === 0) {
       el.textContent = '';
-    else if (moves > rep_moves && rep_moves >= 0)
+      move_log = [];
+    } else if (moves > rep_moves && rep_moves >= 0) {
       el.textContent = 'confirmed move level ' + move_active_level + ', k ' + move_active_k;
-    else if (moves < rep_moves)
+      // rep_player is whoever was to move before this state arrived, i.e. the mover.
+      move_log.push({ n: moves, who: rep_player, level: move_active_level, k: move_active_k });
+    } else if (moves < rep_moves) {
       el.textContent = 'tentative level ' + t_active_level + ', k ' + t_active_k;
+      while (move_log.length > moves) move_log.pop();
+    }
+    showMoveList();
     rep_moves = moves; rep_tl = t_active_level; rep_tk = t_active_k;
   } else if (t_active_level !== rep_tl || t_active_k !== rep_tk) {
     el.textContent = 'tentative level ' + t_active_level + ', k ' + t_active_k;
     rep_tl = t_active_level; rep_tk = t_active_k;
   }
+  rep_player = player;
+}
+setInterval(reportPosition, 250);   // also runs when the page is in a background tab
+
+// Insert key: toggle text-only mode (no graphics calls, no chat panel).
+function setTextOnly(on) {
+  text_only = on;
+  document.body.classList.toggle('text_only', on);
+  if (!on) window.dispatchEvent(new Event('resize'));
+  showMoveList();
+  var n = document.getElementById('Parameters');
+  if (n) n.innerHTML = on ? 'Text-only mode ON (graphics and chat off). Insert key turns it off.'
+                          : 'Text-only mode OFF.';
 }
 
 function stepRotation() {         // called once per frame from tick()
@@ -1901,7 +1970,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (active_level < actual_levels-1) {
         restore_bond_colors(active_level, active_k);
       	active_level += 1;
-      	t_active_level += 1;
+      	t_active_level = active_level;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k,
         socket ? my_seat : player, 1);
@@ -1912,7 +1981,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       if (active_level > 0) {
         restore_bond_colors(active_level, active_k);
       	active_level -= 1;
-      	t_active_level -= 1;
+      	t_active_level = active_level;
       	if(player == 1) active_i = 19*active_level + active_k;
       	set_bond_colors(active_level, active_k,
         socket ? my_seat : player, 1);
@@ -2240,6 +2309,9 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
            }
          else
            nf.innerHTML = "game has already started so cylinder length cannot be changed";
+      break;
+    case 45: // Insert key: toggle text-only mode
+      setTextOnly(!text_only);
       break;
     case 35: // End key: increase rotation_per_key_press by rotation_step
       ev.preventDefault();

@@ -239,6 +239,7 @@ function isInt(x, lo, hi) {
 
 io.on('connection', (socket) => {
   console.log('connect', socket.id);
+  let skipNextDelta = false;
 
   // A malformed message from any client must never crash the server for everyone.
   function on(eventName, handler) {
@@ -324,15 +325,25 @@ io.on('connection', (socket) => {
   // ── Move ────────────────────────────────────────────────────────────────
   // Payload: { level, k }
   on('move', ({ level, k } = {}) => {
-    const room = roomOf(socket); if (!room) return;
+    // Every refusal is reported to the sender (with the true state, so the sender's
+    // screen can drop the stone it drew optimistically).  The client always sends a
+    // cylinder_delta right after a move; skip that one too, or it would overwrite the
+    // server's bond colours with colours for a move that never happened.
+    const room = roomOf(socket);
+    function reject(reason) {
+      if (room) skipNextDelta = true;
+      socket.emit('move_rejected', { reason, level, k, state: room ? room.state : null });
+    }
+    if (!room) { reject('Your move was not accepted: you are not in a game (the server may have restarted). Reload the page.'); return; }
     const state = room.state;
     const seat = seatOf(room, socket.id);
-    if (seat === null) return;
-    if (state.winning_player > 0) return;             // game over
-    if (!isInt(level, 0, state.actual_levels - 1) || !isInt(k, 0, 18)) return;
+    if (seat === null) { reject('Spectators cannot make moves.'); return; }
+    if (state.winning_player > 0) { reject('Your move was not accepted: the game is over. Press Enter to start a new game.'); return; }
+    if (!isInt(level, 0, state.actual_levels - 1) || !isInt(k, 0, 18)) { reject('Your move was not accepted: invalid position.'); return; }
+    if (seat !== state.player) { reject('Your move was not accepted: it is not your turn.'); return; }
 
     const i = 19 * level + k;
-    if (state.sphere_colors[i] !== 0) return;         // already occupied
+    if (state.sphere_colors[i] !== 0) { reject('Your move was not accepted: level ' + level + ', k ' + k + ' is already occupied.'); return; }
 
     // Record for undo
     state.move_active_level = level;
@@ -366,6 +377,7 @@ io.on('connection', (socket) => {
   // After a move the client that made it sends back the updated cylinder_colors
   // (it already ran set_bond_colors locally).  We store it and relay to the other.
   on('cylinder_delta', (cylinder_colors) => {
+    if (skipNextDelta) { skipNextDelta = false; return; }   // follows a rejected move
     const room = roomOf(socket); if (!room) return;
     if (seatOf(room, socket.id) === null) return;   // spectators may not change the board
     if (!Array.isArray(cylinder_colors) || cylinder_colors.length > MAX_CYLINDERS) return;
@@ -549,6 +561,8 @@ io.on('connection', (socket) => {
   on('cursor', (data) => {
     const room = roomOf(socket); if (!room) return;
     if (!data || !isInt(data.level, 0, MAX_LEVELS - 1) || !isInt(data.k, 0, 18)) return;
+    // Only the player whose turn it is may move the shared cursor (drops late, stale messages).
+    if (seatOf(room, socket.id) !== room.state.player) return;
     socket.to(room.code).emit('cursor', { level: data.level, k: data.k });
   });
 
