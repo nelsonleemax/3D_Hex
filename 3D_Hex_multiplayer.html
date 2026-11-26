@@ -1170,6 +1170,13 @@ function main() {
   // Register the event handler — skip game keys when chat input is focused
   document.onkeydown = function(ev) {
     if (in_lobby) return;   // lobby is open: let Tab/Enter/typing work normally
+    // Insert toggles text-only mode in every state (even with the chat box focused),
+    // and is recognised by ev.key too, for tools that send only the key name.
+    if (ev.key === 'Insert' || ev.keyCode === 45) {
+      ev.preventDefault();
+      if (!ev.repeat) setTextOnly(!text_only);
+      return;
+    }
     if (document.activeElement && document.activeElement.id === 'chat_input') return;
     keydown(ev, gl);
   };
