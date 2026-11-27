@@ -455,6 +455,24 @@ function lobbyShow(view) {            // view: 'main' or 'wait'
   lobbyEl(view === 'main' ? 'lobby_stranger' : 'lobby_cancel').focus();
 }
 function lobbyMessage(text) { lobbyEl('lobby_msg').textContent = text || ''; }
+// A game key pressed while we are still waiting in the lobby, a moment before the
+// server's 'welcome' arrives (for example right after the opponent joins), would be
+// lost.  Remember such keys for 3 seconds and replay them once the game starts.
+var lobby_key_queue = [];
+function queueLobbyKey(ev) {
+  if (lobbyEl('lobby_wait').style.display !== 'block') return;       // only while waiting
+  var t = ev.target && ev.target.tagName;
+  if (t === 'INPUT' || t === 'TEXTAREA') return;
+  if ([9, 13, 16, 17, 18, 27, 32].indexOf(ev.keyCode) >= 0) return;  // Tab, Enter, Shift, Ctrl, Alt, Esc, Space keep their lobby meaning
+  if (lobby_key_queue.length < 5)
+    lobby_key_queue.push({ keyCode: ev.keyCode, key: ev.key, ctrlKey: ev.ctrlKey, shiftKey: ev.shiftKey,
+                           altKey: ev.altKey, repeat: false, t: Date.now(), preventDefault: function() {} });
+}
+function replayLobbyKeys() {
+  var q = lobby_key_queue; lobby_key_queue = [];
+  var now = Date.now();
+  q.forEach(function(e) { if (now - e.t < 3000) keydown(e, gl); });
+}
 function lobbyHide() {
   in_lobby = false;
   lobbyEl('lobby').style.display = 'none';
@@ -492,10 +510,32 @@ function lobbyCopy() {
 }
 
 // ── Initialise Socket.IO ─────────────────────────────────────────────────────
+var was_in_game = false;
+var client_token = (function() {   // identifies this browser tab to the server across reconnections
+  var t = '';
+  try { t = sessionStorage.getItem('hex_token') || ''; } catch (e) {}
+  if (!t) {
+    t = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { sessionStorage.setItem('hex_token', t); } catch (e) {}
+  }
+  return t;
+})();
+
 function initSocket() {
   socket = io();   // connects back to the server that served this page
 
+  // On every (re)connection, ask to be put back into a game we were in.
+  socket.on('connect', function() { socket.emit('rejoin', { token: client_token }); });
+  socket.on('disconnect', function(reason) {
+    if (was_in_game) nf.innerHTML = 'Connection lost (' + reason + '); reconnecting...';
+  });
+  socket.on('rejoin_failed', function() {
+    if (was_in_game)
+      notifyInfo('The server no longer has this game (it may have restarted), so it cannot be continued. Reload the page to start a new game.');
+  });
+
   socket.on('welcome', function(data) {
+    was_in_game = true;
     my_seat   = data.seat;
     room_code = data.code || null;
     lobbyHide();
@@ -504,6 +544,7 @@ function initSocket() {
     else                    updateSeatBanner('SPECTATOR — you can watch but not play');
     applyServerState(data.state);
     refocusCanvas();
+    replayLobbyKeys();
   });
 
   socket.on('state_update', function(s) {
@@ -685,6 +726,10 @@ function initSocket() {
   socket.on('opponent_left', function(d) {
     pending_confirmation = false;
     if (my_seat === null) { notifyInfo('A player has left the game.'); return; }
+    if (d && d.reconnecting) {
+      notifyInfo('Your opponent\'s connection dropped. Their seat is held for 3 minutes while they reconnect.');
+      return;
+    }
     notifyInfo(room_code
       ? 'Your opponent has left the game. If they return with code ' + room_code + ' you can continue.'
       : 'Your opponent has left the game. Reload this page to find a new opponent.');
@@ -1169,7 +1214,7 @@ function main() {
  
   // Register the event handler — skip game keys when chat input is focused
   document.onkeydown = function(ev) {
-    if (in_lobby) return;   // lobby is open: let Tab/Enter/typing work normally
+    if (in_lobby) { queueLobbyKey(ev); return; }   // lobby is open: let Tab/Enter/typing work normally
     // Insert toggles text-only mode in every state (even with the chat box focused),
     // and is recognised by ev.key too, for tools that send only the key name.
     if (ev.key === 'Insert' || ev.keyCode === 45) {
@@ -1952,8 +1997,12 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
       break;
     case 191: // my laptop's '?' key: switch first player
       //console.log("key code", ev.keyCode);
-      alert("to switch first player type Enter; otherwise continue the game");
-      mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      if (text_only) {   // no modal dialog in text-only mode
+        nf.innerHTML = "to switch first player type Enter; otherwise continue the game";
+      } else {
+        alert("to switch first player type Enter; otherwise continue the game");
+        mouse_down = 0; dragging = false;  // alert consumed the mouseup event
+      }
          waiting_for_confirmation = 1;
       break;
     case  8: // backspace: cancel previous move

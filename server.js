@@ -71,9 +71,19 @@ function appendGameResult(state, winningPlayer) {
 
 const app    = express();
 const server = http.createServer(app);
+const STARTED_AT = new Date();
 const io     = new Server(server, {
-  cors: { origin: '*' }
+  cors: { origin: '*' },
+  // Background browser tabs are throttled and answer pings late; be patient before
+  // deciding that a player has gone.
+  pingInterval: 25000,
+  pingTimeout: 60000
 });
+
+// Log anything that would otherwise kill the process silently.
+process.on('uncaughtException',  (err) => console.error(new Date().toISOString(), 'uncaughtException', err));
+process.on('unhandledRejection', (err) => console.error(new Date().toISOString(), 'unhandledRejection', err));
+process.on('SIGTERM', () => console.log(new Date().toISOString(), 'SIGTERM received: Render is stopping this server'));
 
 // Serve game files from the same directory as server.js
 app.use(express.static(__dirname));
@@ -89,6 +99,12 @@ function sendStats(req, res) {
   res.setHeader('Content-Disposition', 'attachment; filename="statistics_with_date.csv"');
   res.send(csvData);
 }
+// Quick health check: open /status to see how long the server has been up.  If the
+// uptime is much shorter than you expect, the server restarted and lost its games.
+app.get('/status', (req, res) => {
+  res.json({ started: STARTED_AT.toISOString(), uptime_seconds: Math.round(process.uptime()),
+             rooms: rooms.size, connections: io.sockets.sockets.size });
+});
 app.get('/statistics_with_date.csv', sendStats);
 app.get('/statistics.csv', sendStats);   // old address still works
 
@@ -138,6 +154,8 @@ function makeDefaultState() {
 const rooms      = new Map();   // code -> room
 const socketRoom = new Map();   // socket.id -> room code
 let   waitingStranger = null;   // socket.id of the one player waiting for a stranger
+const GRACE_MS    = 3 * 60 * 1000;   // how long a dropped player's seat is held for them
+const graceTimers = new Map();   // old socket.id -> { timer, token, code }
 
 function makeRoom(isPrivate) {
   let code;
@@ -248,6 +266,44 @@ io.on('connection', (socket) => {
       catch (err) { console.error('error in', eventName, err); }
     });
   }
+
+  // ── Reconnection ─────────────────────────────────────────────────────────
+  // Each browser tab has a private token.  If its connection drops (network blip,
+  // throttled background tab, ...) the tab reconnects with a NEW socket id and sends
+  // 'rejoin' with the same token; it is put back in its seat in the same game.
+  on('rejoin', (data) => {
+    const token = data && data.token;
+    if (typeof token !== 'string' || token.length < 8 || token.length > 64) return;
+    socket.hexToken = token;
+    if (roomOf(socket)) return;                       // already in a game
+    let found = null;                                 // { room, seat, oldId }
+    for (const [oldId, g] of graceTimers) {           // old connection already gone
+      if (g.token !== token) continue;
+      const room = rooms.get(g.code);
+      const seat = room ? seatOf(room, oldId) : null;
+      clearTimeout(g.timer); graceTimers.delete(oldId);
+      if (seat) found = { room, seat, oldId };
+      break;
+    }
+    if (!found) {                                     // old connection not yet noticed as dead
+      for (const room of rooms.values()) for (const seat of [1, 2]) {
+        const oldId = room.seats[seat], old = oldId && io.sockets.sockets.get(oldId);
+        if (old && old.hexToken === token && oldId !== socket.id) found = { room, seat, oldId };
+      }
+    }
+    if (!found) { socket.emit('rejoin_failed'); return; }
+    const { room, seat, oldId } = found;
+    room.seats[seat] = socket.id;
+    socketRoom.delete(oldId);
+    socketRoom.set(socket.id, room.code);
+    delete room.entered[oldId];
+    room.entered[socket.id] = true;
+    socket.join(room.code);
+    socket.emit('welcome', { seat, state: room.state, code: room.isPrivate ? room.code : null });
+    socket.to(room.code).emit('opponent_joined');
+    emitPlayerList(room);
+    console.log(new Date().toISOString(), 'rejoined', room.code, 'seat', seat, 'old', oldId, 'new', socket.id);
+  });
 
   // ── Lobby ───────────────────────────────────────────────────────────────
 
@@ -614,8 +670,23 @@ io.on('connection', (socket) => {
   });
 
   // ── Disconnect ───────────────────────────────────────────────────────────
-  socket.on('disconnect', () => {
-    console.log('disconnect', socket.id);
+  socket.on('disconnect', (reason) => {
+    const room = roomOf(socket);
+    const seat = room ? seatOf(room, socket.id) : null;
+    console.log(new Date().toISOString(), 'disconnect', socket.id, 'reason:', reason,
+                seat ? `(seat ${seat} of ${room.code})` : '');
+    if (seat && room.entered[socket.id] && socket.hexToken) {
+      // A player in a running game: hold the seat so the same browser can come back.
+      const stub = { id: socket.id, leave() {} };
+      const timer = setTimeout(() => {
+        graceTimers.delete(socket.id);
+        console.log(new Date().toISOString(), 'grace period over for', socket.id, 'in', room.code);
+        leaveRoom(stub);
+      }, GRACE_MS);
+      graceTimers.set(socket.id, { timer, token: socket.hexToken, code: room.code });
+      io.to(room.code).emit('opponent_left', { seat, reconnecting: true });
+      return;
+    }
     leaveRoom(socket);
     if (waitingStranger === socket.id) waitingStranger = null;
   });
