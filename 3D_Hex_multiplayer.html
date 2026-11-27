@@ -1865,7 +1865,7 @@ function reportPosition() {
   if (!el) return;
   if (moves !== rep_moves) {
     if (moves === 0) {
-      el.textContent = '';
+      el.textContent = 'tentative level ' + t_active_level + ', k ' + t_active_k;   // show the starting cursor too
       move_log = [];
     } else if (moves > rep_moves && rep_moves >= 0) {
       el.textContent = 'confirmed move level ' + move_active_level + ', k ' + move_active_k;
