@@ -154,7 +154,7 @@ function makeDefaultState() {
 const rooms      = new Map();   // code -> room
 const socketRoom = new Map();   // socket.id -> room code
 let   waitingStranger = null;   // socket.id of the one player waiting for a stranger
-const GRACE_MS    = 3 * 60 * 1000;   // how long a dropped player's seat is held for them
+const GRACE_MS    = 10 * 60 * 1000;   // how long a dropped player's seat is held for them
 const graceTimers = new Map();   // old socket.id -> { timer, token, code }
 
 function makeRoom(isPrivate) {

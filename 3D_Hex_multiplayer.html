@@ -732,7 +732,7 @@ function initSocket() {
     pending_confirmation = false;
     if (my_seat === null) { notifyInfo('A player has left the game.'); return; }
     if (d && d.reconnecting) {
-      notifyInfo('Your opponent\'s connection dropped. Their seat is held for 3 minutes while they reconnect.');
+      notifyInfo('Your opponent\'s connection dropped. Their seat is held for 10 minutes while they reconnect.');
       return;
     }
     notifyInfo(room_code
