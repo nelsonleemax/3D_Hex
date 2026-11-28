@@ -201,10 +201,12 @@ function notifyTurn(msg) {
 // ── Apply a full state snapshot from the server ─────────────────────────────
 // Called on 'welcome' and 'state_update'.  Updates all shared variables and
 // triggers a redraw.
+var force_turn_notice = false;   // set by 'welcome' so a (re)joining player is told whose turn it is
 function applyServerState(s) {
   var prev_moves          = moves;
   var prev_random_sites   = random_sites;
   var prev_player         = player;
+  var force_turn = force_turn_notice; force_turn_notice = false;
   var prev_winning_player = winning_player; // for reset detection
   var prev_redturns       = redturns;
   var prev_levels         = actual_levels;
@@ -353,7 +355,9 @@ function applyServerState(s) {
     //   (b) this was NOT caused by an undo (s.undo_calls===1 means undo —
     //       the undoing player already knows it's their turn, and the other
     //       player should not be told it's now the undoing player's turn).
-    if (player !== prev_player && s.undo_calls === 0 &&
+    // Also announce the turn after a new game starts (the player may be the same as
+    // before) and after joining or rejoining a game.
+    if ((player !== prev_player || is_reset || force_turn) && s.undo_calls === 0 &&
         socket && my_seat !== null && my_seat === player) {
       var turnMsg = (player === 1)
         ? 'It is now your turn, Red. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
@@ -542,6 +546,7 @@ function initSocket() {
     if (my_seat === 1)      updateSeatBanner('You are RED  (seat 1)');
     else if (my_seat === 2) updateSeatBanner('You are GREEN (seat 2)');
     else                    updateSeatBanner('SPECTATOR — you can watch but not play');
+    force_turn_notice = true;
     applyServerState(data.state);
     refocusCanvas();
     replayLobbyKeys();
