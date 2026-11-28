@@ -533,8 +533,8 @@ io.on('connection', (socket) => {
     next.actual_levels = prev.actual_levels;
     next.redturns      = prev.redturns;
     next.require_space = prev.require_space;
-    const first = (saved_first_player === 1 || saved_first_player === 2)
-                  ? saved_first_player : prev.saved_first_player;
+    // The server's own setting is authoritative; a page's copy may be out of date.
+    const first = prev.saved_first_player;
     next.player             = first;
     next.saved_first_player = first;
     next.red_moves          = Math.floor(next.redturns);
@@ -549,7 +549,11 @@ io.on('connection', (socket) => {
     const state = room.state;
     const seat = seatOf(room, socket.id);
     if (seat === null) return;
-    if (state.moves > 0) return;   // ignore if game started
+    if (state.moves > 0) {         // ignore if game started
+      if (changes.first_player !== undefined)
+        socket.emit('setup_refused', { reason: 'Cannot change the first player. The game has already started.' });
+      return;
+    }
 
     if (changes.actual_levels !== undefined) {
       if (isInt(changes.actual_levels, 2, MAX_LEVELS))

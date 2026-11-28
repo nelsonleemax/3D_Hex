@@ -260,6 +260,7 @@ function applyServerState(s) {
   var is_reset = (moves === 0 && s.random_sites === 0 &&
                   (prev_moves > 0 || prev_winning_player > 0 || prev_random_sites > 0));
   if (is_reset) {
+    waiting_for_confirmation = 0;   // a '/' or Tab typed before the new game must not stay armed
     winning_player     = 0;
     actual_nsites      = 19 * actual_levels;
     actual_n_cylinders = 7 * actual_nsites;
@@ -275,7 +276,7 @@ function applyServerState(s) {
     for (var ci = 0; ci < actual_nsites; ++ci) sphere_colors[ci] = 0;
     for (var ci = 0; ci < 7*actual_nsites; ++ci) cylinder_colors[ci] = 0;
     nf.innerHTML = (player === 1)
-      ? 'New game. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
+      ? 'New game. Remaining red moves: ' + Math.ceil(red_moves).toFixed(0)
       : 'New game. Green goes first.';
     initSites();
     make_bond_sites();
@@ -347,7 +348,7 @@ function applyServerState(s) {
       } else if (player === 2) {
         nf.innerHTML = 'Green turn';
       } else {
-        nf.innerHTML = 'Remaining red turns: ' + Math.ceil(red_moves).toFixed(0);
+        nf.innerHTML = 'Remaining red moves: ' + Math.ceil(red_moves).toFixed(0);
       }
     }
     // Notify the player whose turn it just became — but only when:
@@ -360,8 +361,9 @@ function applyServerState(s) {
     if ((player !== prev_player || is_reset || force_turn) && s.undo_calls === 0 &&
         socket && my_seat !== null && my_seat === player) {
       var turnMsg = (player === 1)
-        ? 'It is now your turn, Red. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
-        : 'It is now your turn, Green.';
+        ? 'It is now your turn, Red. Remaining red moves: ' + Math.ceil(red_moves).toFixed(0) +
+          ', Future red moves: ' + futureRedMoves(red_moves, 16, true)
+        : 'It is now your turn, Green. Future red moves: ' + futureRedMoves(red_moves, 16, false);
       notifyTurn(turnMsg);
     }
   }
@@ -626,7 +628,7 @@ function initSocket() {
     var turnMsg;
     if (my_seat === player) {
       turnMsg = (player === 1)
-        ? 'You are Red. Your turn. Remaining red turns: ' + Math.ceil(red_moves).toFixed(0)
+        ? 'You are Red. Your turn. Remaining red moves: ' + Math.ceil(red_moves).toFixed(0)
         : 'You are Green. Your turn.';
       notifyTurn(turnMsg);
     } else {
@@ -687,6 +689,12 @@ function initSocket() {
       updateSeatBanner('You are GREEN (seat 2)');
     else
       updateSeatBanner('SPECTATOR — you can watch but not play');
+  });
+
+  socket.on('setup_refused', function(d) {
+    waiting_for_confirmation = 0;
+    nf.innerHTML = d.reason;
+    notifyInfo(d.reason);
   });
 
   // The server refused my move: drop the stone I drew optimistically and show why.
@@ -1748,7 +1756,7 @@ function undo() {
 	     if (red_moves_incremented)
 	        red_moves -= redturns;
 	     red_moves = red_moves + 1;
-	     nf.innerHTML = "Red turn. Remaining red turns: " +
+	     nf.innerHTML = "Red turn. Remaining red moves: " +
                   Math.ceil(red_moves).toFixed(0);
              }
           undo_calls = 1;
@@ -1805,7 +1813,7 @@ function do_new_move() {
           undo_seat = (player == 1) ? 1 : 2;
           if (player == 1) {
              red_moves = red_moves - 1;
-             nf.innerHTML = "Remaining red turns: " +
+             nf.innerHTML = "Remaining red moves: " +
                   Math.ceil(red_moves).toFixed(0);
              if (red_moves <= 0) {
                 red_moves += redturns;
@@ -1819,7 +1827,7 @@ function do_new_move() {
              }
           else {
              player = 1;
-             nf.innerHTML = "Remaining red turns: " +
+             nf.innerHTML = "Remaining red moves: " +
                   Math.ceil(red_moves).toFixed(0);
              move_history = [];
              undo_seat = 0;
@@ -1944,6 +1952,25 @@ function setTextOnly(on) {
   var n = document.getElementById('Parameters');
   if (n) n.innerHTML = on ? 'Text-only mode ON (graphics and chat off). Insert key turns it off.'
                           : 'Text-only mode OFF.';
+}
+
+// The numbers of red placements in the next n red turns, worked out with exactly the
+// arithmetic the server uses (red_moves is reduced by 1 per placement; when it reaches
+// 0 or less the red turn ends and redturns is added back).  If finishCurrent is true, red
+// is in the middle of a turn: skip the rest of it and list the turns after it.
+function futureRedMoves(rm, n, finishCurrent) {
+  var out = [], r = rm;
+  if (finishCurrent) {
+    do { r -= 1; } while (r > 0);
+    r += redturns;
+  }
+  for (var i = 0; i < n; ++i) {
+    var c = 0;
+    do { r -= 1; ++c; } while (r > 0);
+    out.push(c);
+    r += redturns;
+  }
+  return out.join(' ');
 }
 
 function stepRotation() {         // called once per frame from tick()
@@ -2174,6 +2201,7 @@ function keydown(ev, gl, n, viewProjMatrix, u_MvpMatrix, u_NormalMatrix) {
     case 13: // enter key
       if (winning_player > 0) {
           mouse_down = 0; dragging = false;
+          waiting_for_confirmation = 0;
           if (socket) {
             socket.emit('reset', { saved_first_player: saved_first_player });
           } else {
